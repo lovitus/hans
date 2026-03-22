@@ -1,7 +1,7 @@
 Features that would be welcome as contributions:
 
-- HMAC authentication (#3)
-- IPv6 support (#4)
-- Site-to-site support (#6)
-- Multiple clients behind same NAT (#9)
+- SCRAM authentication
+- IPv6 support
+- Site-to-site support
+- Multiple clients behind same NAT (https://github.com/friedrich/hans/issues/9)
 - Password via environment variable (e.g. HANS_PASSWORD)
