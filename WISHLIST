@@ -1,0 +1,7 @@
+Features that would be welcome as contributions:
+
+- HMAC authentication (#3)
+- IPv6 support (#4)
+- Site-to-site support (#6)
+- Multiple clients behind same NAT (#9)
+- Password via environment variable (e.g. HANS_PASSWORD)
