@@ -346,11 +346,13 @@ void Server::pollReceived(ClientData *client, uint16_t echoId, uint16_t echoSeq)
     if (client->pendingPackets.size() > 0)
     {
         Packet &packet = client->pendingPackets.front();
-        memcpy(echoSendPayloadBuffer(), &packet.data[0], packet.data.size());
+        const TunnelHeader::Type packetType = packet.type;
+        const int packetLength = packet.data.size();
+        memcpy(echoSendPayloadBuffer(), &packet.data[0], packetLength);
         client->pendingPackets.pop();
 
-        DEBUG_ONLY(cout << "pending packet: " << packet.data.size() << " bytes\n");
-        sendEchoToClient(client, packet.type, packet.data.size());
+        DEBUG_ONLY(cout << "pending packet: " << packetLength << " bytes\n");
+        sendEchoToClient(client, packetType, packetLength);
     }
 
     client->lastActivity = now;
@@ -386,7 +388,7 @@ void Server::sendEchoToClient(ClientData *client, TunnelHeader::Type type, int d
         return;
     }
 
-    if (client->pendingPackets.size() == MAX_BUFFERED_PACKETS)
+    if (client->pendingPackets.size() >= MAX_BUFFERED_PACKETS)
     {
         client->pendingPackets.pop();
         syslog(LOG_WARNING, "packet to %s dropped",

@@ -141,6 +141,73 @@ jobs:
               ! ip link show hansp1 >/dev/null 2>&1
               ! grep -q "could not create tunnel device" /tmp/hans-1.out /tmp/hans-2.out /tmp/hans-3.out /tmp/hans-4.out
             '
+      - name: Test packaged downstream backlog at high poll window
+        if: matrix.label == 'amd64-ubuntu24.04'
+        run: |
+          docker run --rm --privileged \
+            -v "${{ github.workspace }}/dist/${{ matrix.label }}:/product:ro" \
+            "${{ matrix.runtime_image }}" \
+            bash -c '
+              set -eu
+              apt-get update -qq
+              DEBIAN_FRONTEND=noninteractive apt-get install -y -qq iproute2 iperf3
+              mkdir -p /dev/net
+              if [ ! -c /dev/net/tun ]; then
+                mknod /dev/net/tun c 10 200
+              fi
+              chmod 666 /dev/net/tun
+
+              cleanup() {
+                kill "${client_pid:-}" "${server_pid:-}" 2>/dev/null || true
+                ip netns delete hans-client 2>/dev/null || true
+                ip netns delete hans-server 2>/dev/null || true
+              }
+              trap cleanup EXIT INT TERM
+
+              ip netns add hans-server
+              ip netns add hans-client
+              ip link add under-server type veth peer name under-client
+              ip link set under-server netns hans-server
+              ip link set under-client netns hans-client
+              ip -n hans-server link set lo up
+              ip -n hans-client link set lo up
+              ip -n hans-server addr add 192.0.2.1/24 dev under-server
+              ip -n hans-client addr add 192.0.2.2/24 dev under-client
+              ip -n hans-server link set under-server up
+              ip -n hans-client link set under-client up
+              ip netns exec hans-server tc qdisc add dev under-server root netem delay 20ms
+
+              ip netns exec hans-server /product/hans \
+                -s 10.66.77.0 -p hans-backlog-ci -f >/tmp/hans-server.log 2>&1 &
+              server_pid=$!
+              sleep 1
+              ip netns exec hans-client /product/hans \
+                -c 192.0.2.1 -p hans-backlog-ci -w 100 -f >/tmp/hans-client.log 2>&1 &
+              client_pid=$!
+
+              connected=0
+              for attempt in $(seq 1 20); do
+                if ip -n hans-client -4 addr show | grep -q "10.66.77.100/24"; then
+                  connected=1
+                  break
+                fi
+                sleep 0.5
+              done
+              if [ "$connected" -ne 1 ]; then
+                cat /tmp/hans-server.log /tmp/hans-client.log
+                exit 1
+              fi
+
+              ip netns exec hans-client iperf3 -s -1 -p 55201 >/tmp/iperf-server.log 2>&1 &
+              iperf_pid=$!
+              sleep 1
+              ip netns exec hans-server iperf3 \
+                -c 10.66.77.100 -p 55201 -t 3 --connect-timeout 5000 | tee /tmp/iperf-client.log
+              wait "$iperf_pid"
+              kill -0 "$server_pid"
+              kill -0 "$client_pid"
+              grep -q "receiver" /tmp/iperf-client.log
+            '
       - uses: actions/upload-artifact@v4
         with:
           name: hans-linux-${{ matrix.label }}
