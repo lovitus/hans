@@ -24,5 +24,7 @@
 
 #define CHALLENGE_SIZE 20
 
+#define DEVICE_ID_HEX_SIZE 32
+
 // #define DEBUG_ONLY(a) a
 #define DEBUG_ONLY(a)

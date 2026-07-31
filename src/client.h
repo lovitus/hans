@@ -31,12 +31,14 @@ class Client : public Worker
 public:
     Client(int tunnelMtu, const std::string *deviceName, uint32_t serverIp,
            int maxPolls, const std::string &passphrase, uid_t uid, gid_t gid,
-           bool changeEchoId, bool changeEchoSeq, uint32_t desiredIp);
+           bool changeEchoId, bool changeEchoSeq, uint32_t desiredIp,
+           const std::string &deviceId);
     virtual ~Client();
 
     virtual void run();
 
     static const Worker::TunnelHeader::Magic magic;
+    static const Worker::TunnelHeader::Magic v2Magic;
 protected:
     enum State
     {
@@ -63,6 +65,10 @@ protected:
     uint32_t serverIp;
     uint32_t clientIp;
     uint32_t desiredIp;
+    std::string deviceId;
+    bool useLegacyConnectionRequest;
+    int v2ResetCount;
+    int v2RequestAttempts;
 
     int maxPolls;
     int pollTimeoutNr;

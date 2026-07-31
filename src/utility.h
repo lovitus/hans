@@ -28,6 +28,11 @@ class Utility
 public:
     static std::string formatIp(uint32_t ip);
     static int rand();
+    static bool isDeviceId(const std::string &id);
+    static std::string normalizeDeviceId(const std::string &id);
+    static std::string defaultStateFile(const std::string &name);
+    static void ensureParentDirectory(const std::string &path);
+    static std::string loadOrCreateDeviceId(const std::string &path);
 };
 
 #endif

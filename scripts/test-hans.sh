@@ -64,6 +64,13 @@ if [ "$HELP_OK" -ne 0 ]; then
 fi
 echo "OK   [$LABEL]: help check passed"
 
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+if [ -x "$SCRIPT_DIR/test-identity-leases.sh" ]; then
+    "$SCRIPT_DIR/test-identity-leases.sh" "$BIN"
+else
+    sh "$SCRIPT_DIR/test-identity-leases.sh" "$BIN"
+fi
+
 # ---------------------------------------------------------------------------
 # 4. Best-effort loopback client/server connection test.
 # ---------------------------------------------------------------------------

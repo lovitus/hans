@@ -20,6 +20,7 @@
 #include "client.h"
 #include "server.h"
 #include "exception.h"
+#include "utility.h"
 
 #include <iostream>
 #include <arpa/inet.h>
@@ -36,6 +37,7 @@
 #include <sys/socket.h>
 #include <signal.h>
 #include <memory>
+#include <getopt.h>
 
 #ifndef AI_V4MAPPED // Not supported on OpenBSD 6.0
 #define AI_V4MAPPED 0
@@ -62,19 +64,29 @@ static void sig_int_handler(int)
 static void usage()
 {
     std::cerr <<
-        "Hans - IP over ICMP version 1.1\n\n"
+        "Hans - IP over ICMP version 1.2\n\n"
         "RUN AS CLIENT\n"
         "  hans -c server [-fv] [-p passphrase] [-u user] [-d tun_device]\n"
-        "       [-m reference_mtu] [-w polls]\n\n"
+        "       [-m reference_mtu] [-w polls] [--device-id id]\n"
+        "       [--device-id-file path]\n\n"
         "RUN AS SERVER (linux only)\n"
         "  hans -s network [-fvr] [-p passphrase] [-u user] [-d tun_device]\n"
-        "       [-m reference_mtu] [-a ip]\n\n"
+        "       [-m reference_mtu] [--lease-file path]\n\n"
+        "LIST SERVER PEERS\n"
+        "  hans --list-peers [--lease-file path]\n\n"
+        "SHOW CLIENT DEVICE ID\n"
+        "  hans --show-device-id [--device-id-file path]\n\n"
         "ARGUMENTS\n"
         "  -c server     Run as client. Connect to given server address.\n"
         "  -s network    Run as server. Use given network address on virtual interfaces.\n"
         "  -p passphrase Set passphrase.\n"
         "  -u username   Change user under which the program runs.\n"
         "  -a ip         Request assignment of given tunnel ip address from the server.\n"
+        "  -I id         Use an explicit persistent 32-hex-character device id.\n"
+        "  -k path       Load/create the client device id in this file.\n"
+        "  -j path       Store/read sticky server leases in this file.\n"
+        "  -l            List peers from the server lease file and exit.\n"
+        "  -o            Print the persistent client device id and exit.\n"
         "  -r            Respond to ordinary pings in server mode.\n"
         "  -d device     Use given tun device.\n"
         "  -m mtu        Set maximum echo packet size. This should correspond to the MTU\n"
@@ -111,11 +123,26 @@ int main(int argc, char *argv[])
     bool changeEchoId = false;
     bool changeEchoSeq = false;
     bool verbose = false;
+    string deviceId;
+    string deviceIdFile;
+    string leaseFile = Utility::defaultStateFile("leases");
+    bool listPeers = false;
+    bool showDeviceId = false;
 
     openlog(argv[0], LOG_PERROR, LOG_DAEMON);
 
+    static struct option longOptions[] = {
+        {"device-id", required_argument, NULL, 'I'},
+        {"device-id-file", required_argument, NULL, 'k'},
+        {"lease-file", required_argument, NULL, 'j'},
+        {"list-peers", no_argument, NULL, 'l'},
+        {"show-device-id", no_argument, NULL, 'o'},
+        {NULL, 0, NULL, 0}
+    };
+
     int c;
-    while ((c = getopt(argc, argv, "fru:d:p:s:c:m:w:qiva:")) != -1)
+    while ((c = getopt_long(argc, argv, "fru:d:p:s:c:m:w:qiva:I:k:j:lo",
+                            longOptions, NULL)) != -1)
     {
         switch(c) {
             case 'f':
@@ -162,9 +189,51 @@ int main(int argc, char *argv[])
             case 'a':
                 clientIp = ntohl(inet_addr(optarg));
                 break;
+            case 'I':
+                deviceId = optarg;
+                break;
+            case 'k':
+                deviceIdFile = optarg;
+                break;
+            case 'j':
+                leaseFile = optarg;
+                break;
+            case 'l':
+                listPeers = true;
+                break;
+            case 'o':
+                showDeviceId = true;
+                break;
             default:
                 usage();
                 return 1;
+        }
+    }
+
+    if (listPeers)
+        return Server::listPeers(leaseFile);
+
+    if (showDeviceId)
+    {
+        try
+        {
+            if (!deviceId.empty() && !deviceIdFile.empty())
+                throw Exception("--device-id and --device-id-file cannot be used together");
+            if (!deviceId.empty())
+                deviceId = Utility::normalizeDeviceId(deviceId);
+            else
+            {
+                if (deviceIdFile.empty())
+                    deviceIdFile = Utility::defaultStateFile("device-id");
+                deviceId = Utility::loadOrCreateDeviceId(deviceIdFile);
+            }
+            std::cout << deviceId << std::endl;
+            return 0;
+        }
+        catch (Exception e)
+        {
+            syslog(LOG_ERR, "%s", e.errorMessage().data());
+            return 1;
         }
     }
 
@@ -218,10 +287,24 @@ int main(int argc, char *argv[])
         if (isServer)
         {
             worker = new Server(mtu, device.empty() ? NULL : &device, passphrase,
-                                network, answerPing, uid, gid, 5000);
+                                network, answerPing, uid, gid, 5000, leaseFile);
         }
         else
         {
+            if (!deviceId.empty() && !deviceIdFile.empty())
+                throw Exception("--device-id and --device-id-file cannot be used together");
+
+            if (deviceId.empty())
+            {
+                if (deviceIdFile.empty())
+                    deviceIdFile = Utility::defaultStateFile("device-id");
+                deviceId = Utility::loadOrCreateDeviceId(deviceIdFile);
+            }
+            else
+            {
+                deviceId = Utility::normalizeDeviceId(deviceId);
+            }
+
             struct addrinfo hints = {0};
             struct addrinfo *res = NULL;
 
@@ -240,7 +323,7 @@ int main(int argc, char *argv[])
 
             worker = new Client(mtu, device.empty() ? NULL : &device,
                                 ntohl(serverIp), maxPolls, passphrase, uid, gid,
-                                changeEchoId, changeEchoSeq, clientIp);
+                                changeEchoId, changeEchoSeq, clientIp, deviceId);
 
             freeaddrinfo(res);
         }
@@ -252,6 +335,8 @@ int main(int argc, char *argv[])
         }
 
         worker->run();
+        delete worker;
+        worker = NULL;
     }
     catch (Exception e)
     {

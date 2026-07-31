@@ -1,3 +1,9 @@
+Release 1.2 (July 2026)
+-----------------------
+* Add persistent random client device identities
+* Add server-side sticky leases with least-recently-seen offline eviction
+* Add peer listing, device-id inspection, and protocol fallback for old servers
+
 Release 1.1 (November 2022)
 ---------------------------
 * Switch to utun devices on macOS (thanks to unkernet)

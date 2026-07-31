@@ -22,6 +22,7 @@
 
 #include "worker.h"
 #include "auth.h"
+#include "config.h"
 
 #include <map>
 #include <queue>
@@ -29,13 +30,17 @@
 #include <list>
 #include <set>
 #include <string>
+#include <time.h>
 
 class Server : public Worker
 {
 public:
     Server(int tunnelMtu, const std::string *deviceName, const std::string &passphrase,
-           uint32_t network, bool answerEcho, uid_t uid, gid_t gid, int pollTimeout);
+           uint32_t network, bool answerEcho, uid_t uid, gid_t gid, int pollTimeout,
+           const std::string &leaseFile);
     virtual ~Server();
+
+    static int listPeers(const std::string &leaseFile);
 
     struct ClientConnectData
     {
@@ -43,7 +48,14 @@ public:
         uint32_t desiredIp;
     };
 
+    struct ClientConnectDataV2
+    {
+        ClientConnectData legacy;
+        char deviceId[DEVICE_ID_HEX_SIZE];
+    };
+
     static const TunnelHeader::Magic magic;
+    static const TunnelHeader::Magic v2Magic;
 
 protected:
     struct Packet
@@ -71,6 +83,9 @@ protected:
 
         uint32_t realIp;
         uint32_t tunnelIp;
+        uint32_t desiredIp;
+        std::string deviceId;
+        bool protocolV2;
 
         std::queue<Packet> pendingPackets;
 
@@ -85,6 +100,18 @@ protected:
 
     typedef std::list<ClientData> ClientList;
     typedef std::map<uint32_t, ClientList::iterator> ClientIpMap;
+
+    struct Lease
+    {
+        std::string deviceId;
+        uint32_t tunnelIp;
+        time_t lastSeen;
+        bool active;
+        uint32_t realIp;
+    };
+
+    typedef std::map<std::string, Lease> LeaseMap;
+    typedef std::map<uint32_t, std::string> LeaseIpMap;
 
     virtual bool handleEchoData(const TunnelHeader &header, int dataLength, uint32_t realIp, bool reply, uint16_t id, uint16_t seq);
     virtual void handleTunData(int dataLength, uint32_t sourceIp, uint32_t destIp);
@@ -105,17 +132,25 @@ protected:
 
     void pollReceived(ClientData *client, uint16_t echoId, uint16_t echoSeq);
 
-    uint32_t reserveTunnelIp(uint32_t desiredIp);
-    void releaseTunnelIp(uint32_t tunnelIp);
+    uint32_t reserveTunnelIp(uint32_t desiredIp, const std::string &deviceId);
+    void releaseTunnelIp(uint32_t tunnelIp, const std::string &deviceId);
+    void loadLeases();
+    void saveLeases();
+    void updateLease(ClientData *client, bool active);
 
     ClientData *getClientByTunnelIp(uint32_t ip);
     ClientData *getClientByRealIp(uint32_t ip);
+    ClientData *getClientByDeviceId(const std::string &deviceId, ClientData *except);
 
     Auth auth;
 
     uint32_t network;
     std::set<uint32_t> usedIps;
     uint32_t latestAssignedIpOffset;
+    std::string leaseFile;
+    int leaseFd;
+    LeaseMap leases;
+    LeaseIpMap leaseIpMap;
 
     Time pollTimeout;
 

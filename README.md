@@ -22,6 +22,9 @@ as a [GitHub Release](../../releases).
   shared passphrase, then gets assigned a tunnel IP and a virtual `tun`
   interface that carries its IPv4 traffic wrapped inside ICMP echo
   request/reply packets to/from the server.
+- New clients also send a persistent random device ID. The server uses it for
+  sticky leases, so a peer normally receives the same tunnel IP after changing
+  networks or reconnecting.
 - **Server mode is Linux-only** (it relies on Linux-specific networking
   behavior). **Client mode** works on Linux, FreeBSD, OpenBSD, NetBSD, macOS
   and Windows (via Cygwin).
@@ -147,6 +150,52 @@ whitelist it server-side), request it explicitly:
 ./hans -c server -p secret -a 10.0.0.150
 ```
 
+## Persistent peer identity and sticky leases
+
+On first start, a client generates a random 128-bit device ID and stores it in
+`/var/lib/hans/device-id` (or `$HOME/.hans/device-id` when not running as
+root). The ID is not derived from an IP address, network adapter, disk serial
+number, or other hardware, so those values can change without changing the
+peer identity.
+
+The server records leases in `/var/lib/hans/leases`. A reconnecting device
+gets its previous tunnel IP whenever possible. Offline leases are retained
+while unused addresses remain; only when the pool is full does the server
+reclaim the least-recently-seen offline lease. If every address is actively
+in use, the connection is rejected as `server full`.
+
+Inspect the local device ID or the server's lease table with:
+
+```sh
+sudo ./hans --show-device-id
+sudo ./hans --list-peers
+```
+
+Example peer output:
+
+```text
+DEVICE ID                         TUNNEL IP        REAL IP          STATE     LAST SEEN
+4a7f28b1309d4e62b1cc7508ad6f91c2  10.0.0.100      203.0.113.20     online    2026-07-31 16:30:00
+```
+
+Use custom state paths when packaging Hans or running more than one instance:
+
+```sh
+./hans -c server -p secret --device-id-file /etc/hans/site-a.id
+./hans -s 10.0.0.0 -p secret --lease-file /var/lib/hans/site-a.leases
+./hans --list-peers --lease-file /var/lib/hans/site-a.leases
+```
+
+You can also supply a fixed 32-character hexadecimal ID with `--device-id`.
+The device ID is not a secret, but it should be unique. If a system disk is
+replaced without copying the ID file, copy the old ID from backup or configure
+the same value explicitly; no software-only identity can survive loss of all
+locally persisted state.
+
+Servers accept legacy clients without a device ID (those clients continue to
+receive non-sticky leases). New clients automatically fall back to the legacy
+connection request when talking to an older server.
+
 ## Make the server also answer normal pings
 
 By default the server swallows all ICMP echo requests for tunnel use. If you
@@ -192,11 +241,18 @@ sudo systemctl enable --now hans-server
 ```
 RUN AS CLIENT
   hans -c server [-fv] [-p passphrase] [-u user] [-d tun_device]
-       [-m reference_mtu] [-w polls]
+       [-m reference_mtu] [-w polls] [--device-id id]
+       [--device-id-file path]
 
 RUN AS SERVER (linux only)
   hans -s network [-fvr] [-p passphrase] [-u user] [-d tun_device]
-       [-m reference_mtu] [-a ip]
+       [-m reference_mtu] [--lease-file path]
+
+LIST SERVER PEERS
+  hans --list-peers [--lease-file path]
+
+SHOW CLIENT DEVICE ID
+  hans --show-device-id [--device-id-file path]
 
 ARGUMENTS
   -c server     Run as client. Connect to given server address.
@@ -204,6 +260,11 @@ ARGUMENTS
   -p passphrase Set passphrase.
   -u username   Change user under which the program runs.
   -a ip         Request assignment of given tunnel ip address from the server.
+  -I id         Use an explicit persistent 32-hex-character device id.
+  -k path       Load/create the client device id in this file.
+  -j path       Store/read sticky server leases in this file.
+  -l            List peers from the server lease file and exit.
+  -o            Print the persistent client device id and exit.
   -r            Respond to ordinary pings in server mode.
   -d device     Use given tun device.
   -m mtu        Set maximum echo packet size (default 1500, must match on both ends).

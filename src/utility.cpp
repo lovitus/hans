@@ -18,11 +18,22 @@
  */
 
 #include "utility.h"
+#include "exception.h"
+#include "config.h"
 
 #include <stdlib.h>
 #include <stdio.h>
 #include <time.h>
 #include <sstream>
+#include <fstream>
+#include <iomanip>
+#include <string.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/stat.h>
+
+using std::string;
 
 std::string Utility::formatIp(uint32_t ip)
 {
@@ -43,4 +54,125 @@ int Utility::rand()
         srand(time(NULL));
     }
     return ::rand();
+}
+
+bool Utility::isDeviceId(const string &id)
+{
+    if (id.size() != DEVICE_ID_HEX_SIZE)
+        return false;
+
+    for (string::const_iterator it = id.begin(); it != id.end(); ++it)
+    {
+        if (!( (*it >= '0' && *it <= '9') ||
+               (*it >= 'a' && *it <= 'f') ||
+               (*it >= 'A' && *it <= 'F') ))
+            return false;
+    }
+    return true;
+}
+
+string Utility::normalizeDeviceId(const string &id)
+{
+    if (!isDeviceId(id))
+        throw Exception("device id must contain exactly 32 hexadecimal characters");
+
+    string result = id;
+    for (string::iterator it = result.begin(); it != result.end(); ++it)
+    {
+        if (*it >= 'A' && *it <= 'F')
+            *it = *it - 'A' + 'a';
+    }
+    return result;
+}
+
+string Utility::defaultStateFile(const string &name)
+{
+    const char *overrideDir = getenv("HANS_STATE_DIR");
+    if (overrideDir != NULL && overrideDir[0] != '\0')
+        return string(overrideDir) + "/" + name;
+
+    if (geteuid() == 0)
+        return string("/var/lib/hans/") + name;
+
+    const char *home = getenv("HOME");
+    if (home != NULL && home[0] != '\0')
+        return string(home) + "/.hans/" + name;
+
+    return string("/tmp/hans-") + name;
+}
+
+void Utility::ensureParentDirectory(const string &path)
+{
+    string::size_type slash = path.rfind('/');
+    if (slash == string::npos || slash == 0)
+        return;
+
+    string parent = path.substr(0, slash);
+    string::size_type position = 1;
+    while ((position = parent.find('/', position)) != string::npos)
+    {
+        string component = parent.substr(0, position);
+        if (mkdir(component.c_str(), 0755) == -1 && errno != EEXIST)
+            throw Exception("could not create state directory", true);
+        position++;
+    }
+
+    if (mkdir(parent.c_str(), 0700) == -1 && errno != EEXIST)
+        throw Exception("could not create state directory", true);
+}
+
+string Utility::loadOrCreateDeviceId(const string &path)
+{
+    std::ifstream input(path.c_str());
+    string id;
+    if (input >> id)
+        return normalizeDeviceId(id);
+
+    Utility::ensureParentDirectory(path);
+
+    unsigned char randomBytes[DEVICE_ID_HEX_SIZE / 2];
+    int randomFd = open("/dev/urandom", O_RDONLY);
+    bool haveRandom = false;
+    if (randomFd != -1)
+    {
+        ssize_t length = read(randomFd, randomBytes, sizeof(randomBytes));
+        close(randomFd);
+        haveRandom = length == (ssize_t)sizeof(randomBytes);
+    }
+
+    if (!haveRandom)
+    {
+        for (unsigned int i = 0; i < sizeof(randomBytes); ++i)
+            randomBytes[i] = (unsigned char)(Utility::rand() ^ getpid() ^ (i * 37));
+    }
+
+    std::ostringstream encoded;
+    encoded << std::hex << std::setfill('0');
+    for (unsigned int i = 0; i < sizeof(randomBytes); ++i)
+        encoded << std::setw(2) << (unsigned int)randomBytes[i];
+    id = encoded.str();
+
+    int fd = open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0600);
+    if (fd == -1)
+    {
+        if (errno == EEXIST)
+        {
+            std::ifstream racedInput(path.c_str());
+            if (racedInput >> id)
+                return normalizeDeviceId(id);
+        }
+        throw Exception("could not create device id file", true);
+    }
+
+    string contents = id + "\n";
+    ssize_t written = write(fd, contents.data(), contents.size());
+    int savedErrno = errno;
+    close(fd);
+    if (written != (ssize_t)contents.size())
+    {
+        errno = savedErrno;
+        throw Exception("could not write device id file", true);
+    }
+
+    return id;
 }

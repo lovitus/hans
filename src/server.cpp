@@ -21,11 +21,19 @@
 #include "client.h"
 #include "config.h"
 #include "utility.h"
+#include "exception.h"
 
 #include <string.h>
 #include <arpa/inet.h>
 #include <syslog.h>
 #include <iostream>
+#include <fstream>
+#include <sstream>
+#include <iomanip>
+#include <fcntl.h>
+#include <unistd.h>
+#include <errno.h>
+#include <time.h>
 
 using std::string;
 using std::cout;
@@ -34,23 +42,37 @@ using std::endl;
 #define FIRST_ASSIGNED_IP_OFFSET 100
 
 const Worker::TunnelHeader::Magic Server::magic("hans");
+const Worker::TunnelHeader::Magic Server::v2Magic("hns2");
 
 Server::Server(int tunnelMtu, const string *deviceName, const string &passphrase,
-               uint32_t network, bool answerEcho, uid_t uid, gid_t gid, int pollTimeout)
+               uint32_t network, bool answerEcho, uid_t uid, gid_t gid, int pollTimeout,
+               const string &leaseFile)
     : Worker(tunnelMtu, deviceName, answerEcho, uid, gid), auth(passphrase)
 {
     this->network = network & 0xffffff00;
     this->pollTimeout = pollTimeout;
     this->latestAssignedIpOffset = FIRST_ASSIGNED_IP_OFFSET - 1;
+    this->leaseFile = leaseFile;
+    this->leaseFd = -1;
 
     tun.setIp(this->network + 1, this->network + 2);
+
+    Utility::ensureParentDirectory(leaseFile);
+    leaseFd = open(leaseFile.c_str(), O_RDWR | O_CREAT, 0600);
+    if (leaseFd == -1)
+        throw Exception("could not open lease file", true);
+    loadLeases();
 
     dropPrivileges();
 }
 
 Server::~Server()
 {
-
+    for (LeaseMap::iterator it = leases.begin(); it != leases.end(); ++it)
+        it->second.active = false;
+    saveLeases();
+    if (leaseFd != -1)
+        close(leaseFd);
 }
 
 void Server::handleUnknownClient(const TunnelHeader &header, int dataLength, uint32_t realIp, uint16_t echoId, uint16_t echoSeq)
@@ -58,10 +80,15 @@ void Server::handleUnknownClient(const TunnelHeader &header, int dataLength, uin
     ClientData client;
     client.realIp = realIp;
     client.maxPolls = 1;
+    client.protocolV2 = header.magic == Client::v2Magic;
 
     pollReceived(&client, echoId, echoSeq);
 
-    if (header.type != TunnelHeader::TYPE_CONNECTION_REQUEST || dataLength != sizeof(ClientConnectData))
+    if (header.type != TunnelHeader::TYPE_CONNECTION_REQUEST ||
+        (client.protocolV2 && dataLength != sizeof(ClientConnectDataV2)) ||
+        (!client.protocolV2 && dataLength != sizeof(ClientConnectData)) ||
+        (dataLength != sizeof(ClientConnectData) &&
+         dataLength != sizeof(ClientConnectDataV2)))
     {
         syslog(LOG_DEBUG, "invalid request (type %d) from %s", header.type,
                Utility::formatIp(realIp).c_str());
@@ -70,16 +97,35 @@ void Server::handleUnknownClient(const TunnelHeader &header, int dataLength, uin
     }
 
     ClientConnectData *connectData = (ClientConnectData *)echoReceivePayloadBuffer();
+    if (dataLength == sizeof(ClientConnectDataV2))
+    {
+        ClientConnectDataV2 *connectDataV2 =
+            (ClientConnectDataV2 *)echoReceivePayloadBuffer();
+        string receivedId(connectDataV2->deviceId, DEVICE_ID_HEX_SIZE);
+        if (!Utility::isDeviceId(receivedId))
+        {
+            syslog(LOG_WARNING, "invalid device id from %s",
+                   Utility::formatIp(realIp).c_str());
+            sendReset(&client);
+            return;
+        }
+        client.deviceId = Utility::normalizeDeviceId(receivedId);
+        connectData = &connectDataV2->legacy;
+    }
 
     client.maxPolls = connectData->maxPolls;
     client.state = ClientData::STATE_NEW;
-    client.tunnelIp = reserveTunnelIp(connectData->desiredIp);
+    client.desiredIp = connectData->desiredIp;
+    bool replacingDevice = !client.deviceId.empty() &&
+                           getClientByDeviceId(client.deviceId, NULL) != NULL;
+    client.tunnelIp = replacingDevice ? 0 :
+                      reserveTunnelIp(client.desiredIp, client.deviceId);
 
     syslog(LOG_DEBUG, "new client %s with tunnel address %s\n",
            Utility::formatIp(client.realIp).data(),
            Utility::formatIp(client.tunnelIp).data());
 
-    if (client.tunnelIp != 0)
+    if (client.tunnelIp != 0 || replacingDevice)
     {
         client.challenge = auth.generateChallenge(CHALLENGE_SIZE);
         sendChallenge(&client);
@@ -87,7 +133,8 @@ void Server::handleUnknownClient(const TunnelHeader &header, int dataLength, uin
         // add client to list
         clientList.push_front(client);
         clientRealIpMap[realIp] = clientList.begin();
-        clientTunnelIpMap[client.tunnelIp] = clientList.begin();
+        if (client.tunnelIp != 0)
+            clientTunnelIpMap[client.tunnelIp] = clientList.begin();
     }
     else
     {
@@ -113,7 +160,7 @@ void Server::removeClient(ClientData *client)
            Utility::formatIp(client->realIp).data(),
            Utility::formatIp(client->tunnelIp).data());
 
-    releaseTunnelIp(client->tunnelIp);
+    releaseTunnelIp(client->tunnelIp, client->deviceId);
 
     ClientList::iterator it = clientRealIpMap[client->realIp];
 
@@ -138,12 +185,30 @@ void Server::checkChallenge(ClientData *client, int length)
         return;
     }
 
+    if (client->tunnelIp == 0)
+    {
+        ClientData *oldClient = getClientByDeviceId(client->deviceId, client);
+        if (oldClient != NULL)
+            removeClient(oldClient);
+
+        client->tunnelIp = reserveTunnelIp(client->desiredIp, client->deviceId);
+        if (client->tunnelIp == 0)
+        {
+            syslog(LOG_WARNING, "server full");
+            sendEchoToClient(client, TunnelHeader::TYPE_SERVER_FULL, 0);
+            removeClient(client);
+            return;
+        }
+        clientTunnelIpMap[client->tunnelIp] = clientRealIpMap[client->realIp];
+    }
+
     uint32_t *ip = (uint32_t *)echoSendPayloadBuffer();
     *ip = htonl(client->tunnelIp);
 
     sendEchoToClient(client, TunnelHeader::TYPE_CONNECTION_ACCEPT, sizeof(uint32_t));
 
     client->state = ClientData::STATE_ESTABLISHED;
+    updateLease(client, true);
 
     syslog(LOG_INFO, "connection established to %s",
            Utility::formatIp(client->realIp).data());
@@ -161,7 +226,7 @@ bool Server::handleEchoData(const TunnelHeader &header, int dataLength, uint32_t
     if (reply)
         return false;
 
-    if (header.magic != Client::magic)
+    if (header.magic != Client::magic && header.magic != Client::v2Magic)
         return false;
 
     ClientData *client = getClientByRealIp(realIp);
@@ -239,6 +304,19 @@ Server::ClientData *Server::getClientByRealIp(uint32_t ip)
     return &*it->second;
 }
 
+Server::ClientData *Server::getClientByDeviceId(const string &deviceId, ClientData *except)
+{
+    if (deviceId.empty())
+        return NULL;
+
+    for (ClientList::iterator it = clientList.begin(); it != clientList.end(); ++it)
+    {
+        if (&*it != except && it->deviceId == deviceId)
+            return &*it;
+    }
+    return NULL;
+}
+
 void Server::handleTunData(int dataLength, uint32_t, uint32_t destIp)
 {
     if (destIp == network + 255) // ignore broadcasts
@@ -276,13 +354,24 @@ void Server::pollReceived(ClientData *client, uint16_t echoId, uint16_t echoSeq)
     }
 
     client->lastActivity = now;
+    if (!client->deviceId.empty())
+    {
+        LeaseMap::iterator lease = leases.find(client->deviceId);
+        if (lease != leases.end())
+        {
+            lease->second.lastSeen = time(NULL);
+            lease->second.realIp = client->realIp;
+        }
+    }
 }
 
 void Server::sendEchoToClient(ClientData *client, TunnelHeader::Type type, int dataLength)
 {
     if (client->maxPolls == 0)
     {
-        sendEcho(magic, type, dataLength, client->realIp, true, client->pollIds.front().id, client->pollIds.front().seq);
+        sendEcho(client->protocolV2 ? v2Magic : magic, type, dataLength,
+                 client->realIp, true, client->pollIds.front().id,
+                 client->pollIds.front().seq);
         return;
     }
 
@@ -292,7 +381,8 @@ void Server::sendEchoToClient(ClientData *client, TunnelHeader::Type type, int d
         client->pollIds.pop();
 
         DEBUG_ONLY(cout << "sending -> " << client->pollIds.size() << endl);
-        sendEcho(magic, type, dataLength, client->realIp, true, echoId.id, echoId.seq);
+        sendEcho(client->protocolV2 ? v2Magic : magic, type, dataLength,
+                 client->realIp, true, echoId.id, echoId.seq);
         return;
     }
 
@@ -312,9 +402,19 @@ void Server::sendEchoToClient(ClientData *client, TunnelHeader::Type type, int d
     memcpy(&packet.data[0], echoReceivePayloadBuffer(), dataLength);
 }
 
-void Server::releaseTunnelIp(uint32_t tunnelIp)
+void Server::releaseTunnelIp(uint32_t tunnelIp, const string &deviceId)
 {
     usedIps.erase(tunnelIp);
+    if (!deviceId.empty())
+    {
+        LeaseMap::iterator lease = leases.find(deviceId);
+        if (lease != leases.end() && lease->second.tunnelIp == tunnelIp)
+        {
+            lease->second.active = false;
+            lease->second.lastSeen = time(NULL);
+            saveLeases();
+        }
+    }
 }
 
 void Server::handleTimeout()
@@ -332,12 +432,24 @@ void Server::handleTimeout()
         }
     }
 
+    saveLeases();
     setTimeout(KEEP_ALIVE_INTERVAL);
 }
 
-uint32_t Server::reserveTunnelIp(uint32_t desiredIp)
+uint32_t Server::reserveTunnelIp(uint32_t desiredIp, const string &deviceId)
 {
-    if (desiredIp > network + 1 && desiredIp < network + 255 && !usedIps.count(desiredIp))
+    if (!deviceId.empty())
+    {
+        LeaseMap::iterator existing = leases.find(deviceId);
+        if (existing != leases.end() && !usedIps.count(existing->second.tunnelIp))
+        {
+            usedIps.insert(existing->second.tunnelIp);
+            return existing->second.tunnelIp;
+        }
+    }
+
+    if (desiredIp > network + 1 && desiredIp < network + 255 &&
+        !usedIps.count(desiredIp) && !leaseIpMap.count(desiredIp))
     {
         usedIps.insert(desiredIp);
         return desiredIp;
@@ -351,18 +463,156 @@ uint32_t Server::reserveTunnelIp(uint32_t desiredIp)
         if (latestAssignedIpOffset == 255)
             latestAssignedIpOffset = FIRST_ASSIGNED_IP_OFFSET;
 
-        if (!usedIps.count(network + latestAssignedIpOffset))
+        uint32_t candidate = network + latestAssignedIpOffset;
+        if (!usedIps.count(candidate) && !leaseIpMap.count(candidate))
         {
             ipAvailable = true;
             break;
         }
     }
 
+    uint32_t assignedIp = network + latestAssignedIpOffset;
     if (!ipAvailable)
-        return 0;
+    {
+        LeaseMap::iterator oldest = leases.end();
+        for (LeaseMap::iterator it = leases.begin(); it != leases.end(); ++it)
+        {
+            if (it->second.tunnelIp >= network + FIRST_ASSIGNED_IP_OFFSET &&
+                it->second.tunnelIp < network + 255 &&
+                !it->second.active && !usedIps.count(it->second.tunnelIp) &&
+                (oldest == leases.end() || it->second.lastSeen < oldest->second.lastSeen))
+                oldest = it;
+        }
 
-    usedIps.insert(network + latestAssignedIpOffset);
-    return network + latestAssignedIpOffset;
+        if (oldest == leases.end())
+            return 0;
+
+        assignedIp = oldest->second.tunnelIp;
+        leaseIpMap.erase(assignedIp);
+        leases.erase(oldest);
+    }
+
+    usedIps.insert(assignedIp);
+    return assignedIp;
+}
+
+void Server::updateLease(ClientData *client, bool active)
+{
+    if (client->deviceId.empty())
+        return;
+
+    Lease &lease = leases[client->deviceId];
+    if (lease.tunnelIp != 0 && lease.tunnelIp != client->tunnelIp)
+        leaseIpMap.erase(lease.tunnelIp);
+
+    lease.deviceId = client->deviceId;
+    lease.tunnelIp = client->tunnelIp;
+    lease.lastSeen = time(NULL);
+    lease.active = active;
+    lease.realIp = client->realIp;
+    leaseIpMap[lease.tunnelIp] = lease.deviceId;
+    saveLeases();
+}
+
+void Server::loadLeases()
+{
+    leases.clear();
+    leaseIpMap.clear();
+
+    std::ifstream input(leaseFile.c_str());
+    string deviceId;
+    uint32_t tunnelIp;
+    long lastSeen;
+    int active;
+    uint32_t realIp;
+    while (input >> deviceId >> tunnelIp >> lastSeen >> active >> realIp)
+    {
+        if (!Utility::isDeviceId(deviceId) ||
+            tunnelIp <= network + 1 || tunnelIp >= network + 255)
+            continue;
+
+        Lease lease;
+        lease.deviceId = Utility::normalizeDeviceId(deviceId);
+        lease.tunnelIp = tunnelIp;
+        lease.lastSeen = (time_t)lastSeen;
+        lease.active = false;
+        lease.realIp = realIp;
+        leases[lease.deviceId] = lease;
+        leaseIpMap[lease.tunnelIp] = lease.deviceId;
+    }
+    saveLeases();
+}
+
+void Server::saveLeases()
+{
+    if (leaseFd == -1)
+        return;
+
+    std::ostringstream output;
+    for (LeaseMap::const_iterator it = leases.begin(); it != leases.end(); ++it)
+    {
+        const Lease &lease = it->second;
+        output << lease.deviceId << ' ' << lease.tunnelIp << ' '
+               << (long)lease.lastSeen << ' ' << (lease.active ? 1 : 0)
+               << ' ' << lease.realIp << '\n';
+    }
+
+    string data = output.str();
+    if (lseek(leaseFd, 0, SEEK_SET) == -1 || ftruncate(leaseFd, 0) == -1)
+    {
+        syslog(LOG_ERR, "could not save lease file: %s", strerror(errno));
+        return;
+    }
+
+    string::size_type offset = 0;
+    while (offset < data.size())
+    {
+        ssize_t written = write(leaseFd, data.data() + offset, data.size() - offset);
+        if (written <= 0)
+        {
+            syslog(LOG_ERR, "could not save lease file: %s", strerror(errno));
+            return;
+        }
+        offset += written;
+    }
+    fsync(leaseFd);
+}
+
+int Server::listPeers(const string &leaseFile)
+{
+    std::ifstream input(leaseFile.c_str());
+    if (!input)
+    {
+        std::cerr << "could not open lease file: " << leaseFile << std::endl;
+        return 1;
+    }
+
+    cout << std::left << std::setw(34) << "DEVICE ID"
+         << std::setw(17) << "TUNNEL IP"
+         << std::setw(17) << "REAL IP"
+         << std::setw(10) << "STATE"
+         << "LAST SEEN" << endl;
+
+    string deviceId;
+    uint32_t tunnelIp;
+    long lastSeen;
+    int active;
+    uint32_t realIp;
+    while (input >> deviceId >> tunnelIp >> lastSeen >> active >> realIp)
+    {
+        char formattedTime[32] = "-";
+        time_t timestamp = (time_t)lastSeen;
+        struct tm *local = localtime(&timestamp);
+        if (local != NULL)
+            strftime(formattedTime, sizeof(formattedTime), "%Y-%m-%d %H:%M:%S", local);
+
+        cout << std::left << std::setw(34) << deviceId
+             << std::setw(17) << Utility::formatIp(tunnelIp)
+             << std::setw(17) << Utility::formatIp(realIp)
+             << std::setw(10) << (active ? "online" : "offline")
+             << formattedTime << endl;
+    }
+    return 0;
 }
 
 void Server::run()

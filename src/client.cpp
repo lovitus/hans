@@ -32,10 +32,12 @@ using std::vector;
 using std::string;
 
 const Worker::TunnelHeader::Magic Client::magic("hanc");
+const Worker::TunnelHeader::Magic Client::v2Magic("hnc2");
 
 Client::Client(int tunnelMtu, const string *deviceName, uint32_t serverIp,
                int maxPolls, const string &passphrase, uid_t uid, gid_t gid,
-               bool changeEchoId, bool changeEchoSeq, uint32_t desiredIp)
+               bool changeEchoId, bool changeEchoSeq, uint32_t desiredIp,
+               const string &deviceId)
     : Worker(tunnelMtu, deviceName, false, uid, gid), auth(passphrase)
 {
     this->serverIp = serverIp;
@@ -46,6 +48,10 @@ Client::Client(int tunnelMtu, const string *deviceName, uint32_t serverIp,
     this->changeEchoId = changeEchoId;
     this->changeEchoSeq = changeEchoSeq;
     this->nextEchoSequence = Utility::rand();
+    this->deviceId = deviceId;
+    this->useLegacyConnectionRequest = false;
+    this->v2ResetCount = 0;
+    this->v2RequestAttempts = 0;
 
     state = STATE_CLOSED;
 }
@@ -57,13 +63,36 @@ Client::~Client()
 
 void Client::sendConnectionRequest()
 {
-    Server::ClientConnectData *connectData = (Server::ClientConnectData *)echoSendPayloadBuffer();
-    connectData->maxPolls = maxPolls;
-    connectData->desiredIp = desiredIp;
+    if (!useLegacyConnectionRequest && v2RequestAttempts >= 2)
+    {
+        useLegacyConnectionRequest = true;
+        syslog(LOG_WARNING, "server did not answer device-identity handshake; falling back to legacy protocol");
+    }
 
     syslog(LOG_DEBUG, "sending connection request");
 
-    sendEchoToServer(TunnelHeader::TYPE_CONNECTION_REQUEST, sizeof(Server::ClientConnectData));
+    if (useLegacyConnectionRequest)
+    {
+        Server::ClientConnectData *connectData =
+            (Server::ClientConnectData *)echoSendPayloadBuffer();
+        memset(connectData, 0, sizeof(*connectData));
+        connectData->maxPolls = maxPolls;
+        connectData->desiredIp = desiredIp;
+        sendEchoToServer(TunnelHeader::TYPE_CONNECTION_REQUEST,
+                         sizeof(Server::ClientConnectData));
+    }
+    else
+    {
+        v2RequestAttempts++;
+        Server::ClientConnectDataV2 *connectData =
+            (Server::ClientConnectDataV2 *)echoSendPayloadBuffer();
+        memset(connectData, 0, sizeof(*connectData));
+        connectData->legacy.maxPolls = maxPolls;
+        connectData->legacy.desiredIp = desiredIp;
+        memcpy(connectData->deviceId, deviceId.data(), DEVICE_ID_HEX_SIZE);
+        sendEchoToServer(TunnelHeader::TYPE_CONNECTION_REQUEST,
+                         sizeof(Server::ClientConnectDataV2));
+    }
 
     state = STATE_CONNECTION_REQUEST_SENT;
     setTimeout(5000);
@@ -95,7 +124,8 @@ bool Client::handleEchoData(const TunnelHeader &header, int dataLength, uint32_t
     if (realIp != serverIp || !reply)
         return false;
 
-    if (header.magic != Server::magic)
+    if ((!useLegacyConnectionRequest && header.magic != Server::v2Magic) ||
+        (useLegacyConnectionRequest && header.magic != Server::magic))
         return false;
 
     switch (header.type)
@@ -103,6 +133,20 @@ bool Client::handleEchoData(const TunnelHeader &header, int dataLength, uint32_t
         case TunnelHeader::TYPE_RESET_CONNECTION:
             syslog(LOG_DEBUG, "reset received");
 
+            if (state == STATE_CONNECTION_REQUEST_SENT && !useLegacyConnectionRequest)
+            {
+                v2ResetCount++;
+                if (v2ResetCount >= 2)
+                {
+                    useLegacyConnectionRequest = true;
+                    syslog(LOG_WARNING, "server does not accept device identity; falling back to legacy handshake");
+                }
+            }
+            else if (state == STATE_ESTABLISHED)
+            {
+                useLegacyConnectionRequest = false;
+                v2ResetCount = 0;
+            }
             sendConnectionRequest();
             return true;
         case TunnelHeader::TYPE_SERVER_FULL:
@@ -115,6 +159,8 @@ bool Client::handleEchoData(const TunnelHeader &header, int dataLength, uint32_t
             if (state == STATE_CONNECTION_REQUEST_SENT)
             {
                 syslog(LOG_DEBUG, "authentication request received");
+                v2ResetCount = 0;
+                v2RequestAttempts = 0;
                 sendChallengeResponse(dataLength);
                 return true;
             }
@@ -175,7 +221,8 @@ void Client::sendEchoToServer(Worker::TunnelHeader::Type type, int dataLength)
     if (maxPolls == 0 && state == STATE_ESTABLISHED)
         setTimeout(KEEP_ALIVE_INTERVAL);
 
-    sendEcho(magic, type, dataLength, serverIp, false, nextEchoId, nextEchoSequence);
+    sendEcho(useLegacyConnectionRequest ? magic : v2Magic, type, dataLength,
+             serverIp, false, nextEchoId, nextEchoSequence);
 
     if (changeEchoId)
         nextEchoId = nextEchoId + 38543; // some random prime
