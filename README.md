@@ -7,11 +7,23 @@ situation where your Internet access is firewalled, but pings are allowed.
 
 Original project: http://code.gerade.org/hans/
 
-This fork additionally ships a GitHub Actions pipeline
-(`.github/workflows/build-and-release.yml`) that cross-builds `hans` for
-almost every OS/kernel/CPU architecture combination the code supports, runs a
-smoke test on each build, and automatically publishes the resulting binaries
-as a [GitHub Release](../../releases).
+## Features in this fork
+
+This fork keeps the original lightweight ICMP tunnel design and adds
+deployment, compatibility, and peer-management features:
+
+| Feature | What this fork adds |
+| --- | --- |
+| Persistent peer identity | Each client generates a random 128-bit device ID that is independent of its IP address, network adapter, and disk serial number. The ID can also be backed up, moved, or configured explicitly. |
+| Sticky tunnel addresses | The server remembers device-to-IP leases across reconnects and server restarts, so clients normally keep the same tunnel address without configuring `-a`. |
+| Lease retention | Offline leases are retained while unused addresses remain. When the pool is full, only the least-recently-seen offline lease is reclaimed; active peers are never evicted. |
+| Peer inspection | `hans --list-peers` shows device ID, tunnel IP, real IP, online/offline state, and last-seen time. `hans --show-device-id` displays the local persistent identity. |
+| Backward-compatible protocol | New servers still accept legacy clients. New clients try the device-identity protocol first and automatically fall back when connecting to an older server. |
+| Broad release matrix | GitHub Actions builds Linux, macOS, Windows/Cygwin, FreeBSD, OpenBSD, and NetBSD binaries for the CPU architectures supported by the codebase. |
+| Old-Linux support | Statically linked musl binaries avoid glibc version dependencies and run on systems such as CentOS 7, older distributions, embedded Linux, and Alpine. |
+| Runtime packaging | The Windows release includes the required `cygwin1.dll`, allowing the published executable to run without a separate Cygwin installation. |
+| Automated validation | Every build checks version/help output and persistent identity/lease commands. Environments with root and TUN support additionally attempt a real client/server tunnel connection. |
+| Continuous releases | Successful builds are collected and published automatically on the [Releases page](../../releases). |
 
 ## How it works
 
