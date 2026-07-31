@@ -18,6 +18,9 @@
  */
 
 #define MAX_BUFFERED_PACKETS 20
+// Adaptive v3 credits can briefly lag a new TCP burst while the window grows.
+// Keep that transient burst instead of applying the much smaller legacy cap.
+#define MAX_V3_BUFFERED_PACKETS 256
 
 #define KEEP_ALIVE_INTERVAL (60 * 1000)
 #define POLL_INTERVAL 2000

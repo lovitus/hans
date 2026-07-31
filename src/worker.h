@@ -23,6 +23,7 @@
 #include "time.h"
 #include "echo.h"
 #include "tun.h"
+#include "transport.h"
 
 #include <string>
 #include <sys/types.h>
@@ -37,7 +38,10 @@ public:
     virtual void run();
     virtual void stop();
 
-    static int headerSize() { return sizeof(TunnelHeader); }
+    static int headerSize()
+    {
+        return sizeof(TunnelHeader) + TransportV3::HEADER_SIZE;
+    }
 
 protected:
     struct TunnelHeader
@@ -63,7 +67,12 @@ protected:
             TYPE_CHALLENGE_ERROR = 6,
             TYPE_DATA = 7,
             TYPE_POLL = 8,
-            TYPE_SERVER_FULL = 9
+            TYPE_SERVER_FULL = 9,
+            TYPE_DIRECT_PROBE = 10,
+            TYPE_DIRECT_PROBE_REPLY = 11,
+            TYPE_MODE_SET = 12,
+            TYPE_MODE_ACK = 13,
+            TYPE_TRANSPORT_PING = 14
         };
 
         Magic magic;
@@ -85,7 +94,10 @@ protected:
     char *echoSendPayloadBuffer();
     char *echoReceivePayloadBuffer();
 
-    int payloadBufferSize() { return tunnelMtu; }
+    int payloadBufferSize()
+    {
+        return tunnelMtu + TransportV3::HEADER_SIZE;
+    }
 
     void dropPrivileges();
 

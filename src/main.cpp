@@ -64,10 +64,10 @@ static void sig_int_handler(int)
 static void usage()
 {
     std::cerr <<
-        "Hans - IP over ICMP version 1.2\n\n"
+        "Hans - IP over ICMP version 1.3\n\n"
         "RUN AS CLIENT\n"
         "  hans -c server [-fv] [-p passphrase] [-u user] [-d tun_device]\n"
-        "       [-m reference_mtu] [-w polls] [--device-id id]\n"
+        "       [-m reference_mtu] [-w auto|polls] [--device-id id]\n"
         "       [--device-id-file path]\n\n"
         "RUN AS SERVER (linux only)\n"
         "  hans -s network [-fvr] [-p passphrase] [-u user] [-d tun_device]\n"
@@ -93,9 +93,9 @@ static void usage()
         "                of the network between client and server, which is usually 1500\n"
         "                over Ethernet. Has to be the same on client and server. Defaults\n"
         "                to 1500.\n"
-        "  -w polls      Number of echo requests the client sends in advance for the\n"
-        "                server to reply to. 0 disables polling, which is the best choice\n"
-        "                if the network allows unlimited echo replies. Defaults to 10.\n"
+        "  -w auto|polls Adaptive echo-request credits and direct-reply probing are used\n"
+        "                by default. A number forces a fixed legacy window; 0 forces\n"
+        "                direct replies without automatic fallback.\n"
         "  -i            Change echo id on every echo request. May help with buggy\n"
         "                routers. May impact performance with others.\n"
         "  -q            Change echo sequence number on every echo request. May help with\n"
@@ -114,7 +114,7 @@ int main(int argc, char *argv[])
     bool isClient = false;
     bool foreground = false;
     int mtu = 1500;
-    int maxPolls = 10;
+    int maxPolls = -1;
     uint32_t network = INADDR_NONE;
     uint32_t clientIp = INADDR_NONE;
     bool answerPing = false;
@@ -172,7 +172,20 @@ int main(int argc, char *argv[])
                 mtu = atoi(optarg);
                 break;
             case 'w':
-                maxPolls = atoi(optarg);
+                if (strcmp(optarg, "auto") == 0)
+                    maxPolls = -1;
+                else
+                {
+                    char *end = NULL;
+                    long parsed = strtol(optarg, &end, 10);
+                    if (end == optarg || *end != '\0' || parsed < 0 ||
+                        parsed > 255)
+                    {
+                        std::cerr << "invalid poll window\n";
+                        return 1;
+                    }
+                    maxPolls = (int)parsed;
+                }
                 break;
             case 'r':
                 answerPing = true;
@@ -249,7 +262,7 @@ int main(int argc, char *argv[])
 
     if ((isClient == isServer) ||
         (isServer && network == INADDR_NONE) ||
-        (maxPolls < 0 || maxPolls > 255) ||
+        (maxPolls < -1 || maxPolls > 255) ||
         (isServer && (changeEchoSeq || changeEchoId)))
     {
         usage();

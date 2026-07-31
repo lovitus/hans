@@ -51,7 +51,8 @@ bool Worker::TunnelHeader::Magic::operator!=(const Magic &other) const
 
 Worker::Worker(int tunnelMtu, const std::string *deviceName, bool answerEcho,
                uid_t uid, gid_t gid)
-    : echo(tunnelMtu + sizeof(TunnelHeader)), tun(deviceName, tunnelMtu)
+    : echo(tunnelMtu + sizeof(TunnelHeader) + TransportV3::HEADER_SIZE),
+      tun(deviceName, tunnelMtu)
 {
     this->tunnelMtu = tunnelMtu;
     this->answerEcho = answerEcho;

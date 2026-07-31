@@ -43,6 +43,7 @@ jobs:
           sudo apt-get install -y -qq build-essential net-tools
       - name: Build
         run: |
+          make test
           make LDFLAGS=-static
           if readelf -d hans 2>/dev/null | grep -q NEEDED; then
             echo "hans unexpectedly has dynamic dependencies" >&2
@@ -58,12 +59,13 @@ jobs:
           strip -s hans
           mkdir -p "dist/${{ matrix.label }}"
           cp hans "dist/${{ matrix.label }}/hans"
+          cp scripts/test-hans.sh "dist/${{ matrix.label }}/test-hans.sh"
+          cp scripts/test-identity-leases.sh "dist/${{ matrix.label }}/test-identity-leases.sh"
           docker run --rm \
             -e HANS_SKIP_CONNECTION_TEST=1 \
             -v "${{ github.workspace }}/dist/${{ matrix.label }}:/product:ro" \
-            -v "${{ github.workspace }}/scripts:/tests:ro" \
             "${{ matrix.runtime_image }}" \
-            sh /tests/test-hans.sh /product/hans "linux-${{ matrix.label }}-packaged"
+            sh /product/test-hans.sh /product/hans "linux-${{ matrix.label }}-packaged"
       - name: Test packaged Linux veth fallback
         run: |
           docker run --rm \
@@ -141,7 +143,7 @@ jobs:
               ! ip link show hansp1 >/dev/null 2>&1
               ! grep -q "could not create tunnel device" /tmp/hans-1.out /tmp/hans-2.out /tmp/hans-3.out /tmp/hans-4.out
             '
-      - name: Test packaged downstream backlog at high poll window
+      - name: Test packaged adaptive transport, fallback, and recovery
         if: matrix.label == 'amd64-ubuntu24.04'
         run: |
           docker run --rm --privileged \
@@ -150,7 +152,7 @@ jobs:
             bash -c '
               set -eu
               apt-get update -qq
-              DEBIAN_FRONTEND=noninteractive apt-get install -y -qq iproute2 iperf3 net-tools
+              DEBIAN_FRONTEND=noninteractive apt-get install -y -qq iproute2 iperf3 iputils-ping net-tools
               mkdir -p /dev/net
               if [ ! -c /dev/net/tun ]; then
                 mknod /dev/net/tun c 10 200
@@ -162,7 +164,32 @@ jobs:
                 ip netns delete hans-client 2>/dev/null || true
                 ip netns delete hans-server 2>/dev/null || true
               }
-              trap cleanup EXIT INT TERM
+              diagnostics() {
+                status=$?
+                if [ "$status" -ne 0 ]; then
+                  echo "--- hans server log ---" >&2
+                  cat /tmp/hans-server.log >&2 || true
+                  echo "--- hans client log ---" >&2
+                  cat /tmp/hans-client.log >&2 || true
+                fi
+                cleanup
+                exit "$status"
+              }
+              trap diagnostics EXIT INT TERM
+
+              wait_for_log() {
+                file=$1
+                pattern=$2
+                attempts=$3
+                while [ "$attempts" -gt 0 ]; do
+                  grep -q "$pattern" "$file" && return 0
+                  kill -0 "$server_pid"
+                  kill -0 "$client_pid"
+                  sleep 0.5
+                  attempts=$((attempts - 1))
+                done
+                return 1
+              }
 
               ip netns add hans-server
               ip netns add hans-client
@@ -178,11 +205,11 @@ jobs:
               ip netns exec hans-server tc qdisc add dev under-server root netem delay 20ms
 
               ip netns exec hans-server /product/hans \
-                -s 10.66.77.0 -p hans-backlog-ci -f >/tmp/hans-server.log 2>&1 &
+                -s 10.66.77.0 -p hans-transport-ci -f -v >/tmp/hans-server.log 2>&1 &
               server_pid=$!
               sleep 1
               ip netns exec hans-client /product/hans \
-                -c 192.0.2.1 -p hans-backlog-ci -w 100 -f >/tmp/hans-client.log 2>&1 &
+                -c 192.0.2.1 -p hans-transport-ci -f -v >/tmp/hans-client.log 2>&1 &
               client_pid=$!
 
               connected=0
@@ -198,15 +225,86 @@ jobs:
                 exit 1
               fi
 
+              # Auto mode must discover that this path accepts multiple echo
+              # replies and upgrade without a user-specified poll window.
+              wait_for_log /tmp/hans-client.log "direct reply mode enabled" 40
+              grep -q "transport mode is now direct" /tmp/hans-server.log
+              ip netns exec hans-client ping -c 5 -W 2 10.66.77.1
+
+              # Exercise TCP in both directions while using direct replies.
               ip netns exec hans-client iperf3 -s -1 -p 55201 >/tmp/iperf-server.log 2>&1 &
               iperf_pid=$!
               sleep 1
               ip netns exec hans-server iperf3 \
                 -c 10.66.77.100 -p 55201 -t 3 --connect-timeout 5000 | tee /tmp/iperf-client.log
               wait "$iperf_pid"
+              grep -q "receiver" /tmp/iperf-client.log
+
+              ip netns exec hans-server iperf3 -s -1 -p 55202 >/tmp/iperf-reverse-server.log 2>&1 &
+              iperf_pid=$!
+              sleep 1
+              ip netns exec hans-client iperf3 \
+                -c 10.66.77.1 -p 55202 -t 3 --connect-timeout 5000 | tee /tmp/iperf-reverse-client.log
+              wait "$iperf_pid"
+              grep -q "receiver" /tmp/iperf-reverse-client.log
+
+              # Drop both underlay directions. The first mode-change request
+              # is therefore lost as well: after connectivity returns the
+              # client must retry negotiation, not remain stuck in mismatched
+              # direct/credit modes.
+              ip netns exec hans-server tc qdisc replace dev under-server root netem loss 100%
+              ip netns exec hans-client tc qdisc replace dev under-client root netem loss 100%
+              wait_for_log /tmp/hans-client.log "falling back to adaptive poll credits" 20
+              ip netns exec hans-server tc qdisc replace dev under-server root netem delay 20ms
+              ip netns exec hans-client tc qdisc del dev under-client root
+              wait_for_log /tmp/hans-server.log "transport mode is now adaptive-credit" 20
+
+              ip netns exec hans-client ping -c 5 -W 2 10.66.77.1
+              ip netns exec hans-client iperf3 -s -1 -p 55203 >/tmp/iperf-credit-server.log 2>&1 &
+              iperf_pid=$!
+              sleep 1
+              ip netns exec hans-server iperf3 \
+                -c 10.66.77.100 -p 55203 -t 5 --connect-timeout 5000 | tee /tmp/iperf-credit-client.log
+              wait "$iperf_pid"
+              grep -q "receiver" /tmp/iperf-credit-client.log
+              grep -q "adaptive poll target changed" /tmp/hans-client.log
+
+              # The downgrade is not permanent: after a quiet hysteresis
+              # interval, a healthy path is probed and upgraded again.
+              upgraded=0
+              for attempt in $(seq 1 80); do
+                if [ "$(grep -c "direct reply mode enabled" /tmp/hans-client.log || true)" -ge 2 ]; then
+                  upgraded=1
+                  break
+                fi
+                sleep 0.5
+              done
+              [ "$upgraded" -eq 1 ]
+              ip netns exec hans-client ping -c 3 -W 2 10.66.77.1
+
+              # Reconnect from the same real IP before the old server-side
+              # session expires. This exercises v3 session reset and sticky
+              # identity assignment rather than only a first connection.
+              old_address=$(ip -n hans-client -o -4 addr show | sed -n "s/.* inet \([^ ]*\).*/\1/p" | grep "^10.66.77.")
+              kill "$client_pid"
+              wait "$client_pid" 2>/dev/null || true
+              ip netns exec hans-client /product/hans \
+                -c 192.0.2.1 -p hans-transport-ci -f -v >>/tmp/hans-client.log 2>&1 &
+              client_pid=$!
+              reconnected=0
+              for attempt in $(seq 1 40); do
+                new_address=$(ip -n hans-client -o -4 addr show 2>/dev/null | sed -n "s/.* inet \([^ ]*\).*/\1/p" | grep "^10.66.77." || true)
+                if [ "$new_address" = "$old_address" ] &&
+                   [ "$(grep -c "direct reply mode enabled" /tmp/hans-client.log || true)" -ge 3 ]; then
+                  reconnected=1
+                  break
+                fi
+                sleep 0.5
+              done
+              [ "$reconnected" -eq 1 ]
+              ip netns exec hans-client ping -c 3 -W 2 10.66.77.1
               kill -0 "$server_pid"
               kill -0 "$client_pid"
-              grep -q "receiver" /tmp/iperf-client.log
             '
       - uses: actions/upload-artifact@v4
         with:
@@ -263,6 +361,7 @@ jobs:
               set -e
               apt-get update -qq
               apt-get install -y -qq build-essential
+              make test
               make LDFLAGS=-static
               if readelf -d hans 2>/dev/null | grep -q NEEDED; then
                 echo "hans unexpectedly has dynamic dependencies" >&2
@@ -274,15 +373,16 @@ jobs:
               strip -s hans
               mkdir -p "dist/${{ matrix.label }}"
               cp hans "dist/${{ matrix.label }}/hans-linux-${{ matrix.label }}"
+              cp scripts/test-hans.sh "dist/${{ matrix.label }}/test-hans.sh"
+              cp scripts/test-identity-leases.sh "dist/${{ matrix.label }}/test-identity-leases.sh"
             '
       - name: Test packaged binary in a fresh container
         run: |
           docker run --rm --platform ${{ matrix.platform }} \
             -e HANS_SKIP_CONNECTION_TEST=1 \
             -v "${{ github.workspace }}/dist/${{ matrix.label }}:/product:ro" \
-            -v "${{ github.workspace }}/scripts:/tests:ro" \
             ${{ matrix.image }} \
-            sh /tests/test-hans.sh "/product/hans-linux-${{ matrix.label }}" "linux-${{ matrix.label }}-packaged"
+            sh /product/test-hans.sh "/product/hans-linux-${{ matrix.label }}" "linux-${{ matrix.label }}-packaged"
       - uses: actions/upload-artifact@v4
         with:
           name: hans-linux-${{ matrix.label }}
@@ -338,6 +438,7 @@ jobs:
             alpine:3.20 sh -c '
               set -e
               apk add --no-cache build-base linux-headers procps
+              make test
               make LDFLAGS=-static
               if readelf -d hans 2>/dev/null | grep -q NEEDED; then
                 echo "hans unexpectedly has dynamic dependencies" >&2
@@ -349,15 +450,16 @@ jobs:
               strip -s hans
               mkdir -p "dist/${{ matrix.label }}"
               cp hans "dist/${{ matrix.label }}/hans-linux-${{ matrix.label }}"
+              cp scripts/test-hans.sh "dist/${{ matrix.label }}/test-hans.sh"
+              cp scripts/test-identity-leases.sh "dist/${{ matrix.label }}/test-identity-leases.sh"
             '
       - name: Test packaged binary in a fresh Alpine container
         run: |
           docker run --rm --platform ${{ matrix.platform }} \
             -e HANS_SKIP_CONNECTION_TEST=1 \
             -v "${{ github.workspace }}/dist/${{ matrix.label }}:/product:ro" \
-            -v "${{ github.workspace }}/scripts:/tests:ro" \
             alpine:3.20 \
-            sh /tests/test-hans.sh "/product/hans-linux-${{ matrix.label }}" "linux-${{ matrix.label }}-packaged"
+            sh /product/test-hans.sh "/product/hans-linux-${{ matrix.label }}" "linux-${{ matrix.label }}-packaged"
       - uses: actions/upload-artifact@v4
         with:
           name: hans-linux-${{ matrix.label }}
@@ -380,7 +482,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Build
-        run: make
+        run: |
+          make test
+          make
       - name: Test (version, help, connection)
         run: |
           chmod +x scripts/test-hans.sh
@@ -390,6 +494,8 @@ jobs:
           strip -S -x hans
           mkdir -p "dist/${{ matrix.label }}"
           cp hans "dist/${{ matrix.label }}/hans"
+          cp scripts/test-hans.sh "dist/${{ matrix.label }}/test-hans.sh"
+          cp scripts/test-identity-leases.sh "dist/${{ matrix.label }}/test-identity-leases.sh"
           unexpected="$({ otool -L "dist/${{ matrix.label }}/hans" | tail -n +2 || true; } |
             awk '{ print $1 }' |
             grep -Ev '^(/usr/lib/|/System/Library/)' || true)"
@@ -403,7 +509,8 @@ jobs:
             HOME="$RUNNER_TEMP" \
             TMPDIR="$RUNNER_TEMP" \
             HANS_SKIP_CONNECTION_TEST=1 \
-            sh scripts/test-hans.sh "$(pwd)/dist/${{ matrix.label }}/hans" "macos-${{ matrix.label }}-packaged"
+            sh "$(pwd)/dist/${{ matrix.label }}/test-hans.sh" \
+              "$(pwd)/dist/${{ matrix.label }}/hans" "macos-${{ matrix.label }}-packaged"
       - uses: actions/upload-artifact@v4
         with:
           name: hans-macos-${{ matrix.label }}
@@ -599,6 +706,7 @@ jobs:
             true
           run: |
             cd $GITHUB_WORKSPACE
+            make test GCC=cc GPP=c++
             make GCC=cc GPP=c++ LDFLAGS=-static
             chmod +x scripts/test-hans.sh
             sh scripts/test-hans.sh ./hans "freebsd-${{ matrix.release }}-${{ matrix.arch }}"
@@ -606,9 +714,11 @@ jobs:
             product="$GITHUB_WORKSPACE/dist/freebsd-${{ matrix.release }}-${{ matrix.arch }}"
             mkdir -p "$product"
             cp hans "$product/hans-freebsd-${{ matrix.release }}-${{ matrix.arch }}"
+            cp scripts/test-hans.sh "$product/test-hans.sh"
+            cp scripts/test-identity-leases.sh "$product/test-identity-leases.sh"
             file "$product/hans-freebsd-${{ matrix.release }}-${{ matrix.arch }}" | grep -qi 'statically linked'
             env -i PATH=/bin:/usr/bin:/sbin:/usr/sbin HOME=/tmp TMPDIR=/tmp HANS_SKIP_CONNECTION_TEST=1 \
-              sh "$GITHUB_WORKSPACE/scripts/test-hans.sh" \
+              sh "$product/test-hans.sh" \
               "$product/hans-freebsd-${{ matrix.release }}-${{ matrix.arch }}" \
               "freebsd-${{ matrix.release }}-${{ matrix.arch }}-packaged"
       - uses: actions/upload-artifact@v4
@@ -651,6 +761,7 @@ jobs:
             true
           run: |
             cd $GITHUB_WORKSPACE
+            make test GCC=cc GPP=c++
             make GCC=cc GPP=c++ LDFLAGS=-static
             chmod +x scripts/test-hans.sh
             sh scripts/test-hans.sh ./hans "openbsd-${{ matrix.release }}-${{ matrix.arch }}"
@@ -658,6 +769,8 @@ jobs:
             product="$GITHUB_WORKSPACE/dist/openbsd-${{ matrix.release }}-${{ matrix.arch }}"
             mkdir -p "$product"
             cp hans "$product/hans-openbsd-${{ matrix.release }}-${{ matrix.arch }}"
+            cp scripts/test-hans.sh "$product/test-hans.sh"
+            cp scripts/test-identity-leases.sh "$product/test-identity-leases.sh"
             ldd "$product/hans-openbsd-${{ matrix.release }}-${{ matrix.arch }}" >/tmp/hans-ldd.txt 2>&1 || true
             if grep -Eq '=>|/usr/lib/.*\.so' /tmp/hans-ldd.txt; then
               echo "OpenBSD package unexpectedly has dynamic dependencies:" >&2
@@ -665,7 +778,7 @@ jobs:
               exit 1
             fi
             env -i PATH=/bin:/usr/bin:/sbin:/usr/sbin HOME=/tmp TMPDIR=/tmp HANS_SKIP_CONNECTION_TEST=1 \
-              sh "$GITHUB_WORKSPACE/scripts/test-hans.sh" \
+              sh "$product/test-hans.sh" \
               "$product/hans-openbsd-${{ matrix.release }}-${{ matrix.arch }}" \
               "openbsd-${{ matrix.release }}-${{ matrix.arch }}-packaged"
       - uses: actions/upload-artifact@v4
@@ -711,6 +824,7 @@ jobs:
             true
           run: |
             cd $GITHUB_WORKSPACE
+            make test GCC=cc GPP=c++
             make GCC=cc GPP=c++ LDFLAGS=-static
             chmod +x scripts/test-hans.sh
             sh scripts/test-hans.sh ./hans "netbsd-${{ matrix.release }}-${{ matrix.arch }}"
@@ -718,9 +832,11 @@ jobs:
             product="$GITHUB_WORKSPACE/dist/netbsd-${{ matrix.release }}-${{ matrix.arch }}"
             mkdir -p "$product"
             cp hans "$product/hans-netbsd-${{ matrix.release }}-${{ matrix.arch }}"
+            cp scripts/test-hans.sh "$product/test-hans.sh"
+            cp scripts/test-identity-leases.sh "$product/test-identity-leases.sh"
             file "$product/hans-netbsd-${{ matrix.release }}-${{ matrix.arch }}" | grep -qi 'statically linked'
             env -i PATH=/bin:/usr/bin:/sbin:/usr/sbin HOME=/tmp TMPDIR=/tmp HANS_SKIP_CONNECTION_TEST=1 \
-              sh "$GITHUB_WORKSPACE/scripts/test-hans.sh" \
+              sh "$product/test-hans.sh" \
               "$product/hans-netbsd-${{ matrix.release }}-${{ matrix.arch }}" \
               "netbsd-${{ matrix.release }}-${{ matrix.arch }}-packaged"
       - uses: actions/upload-artifact@v4

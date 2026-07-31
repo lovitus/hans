@@ -77,10 +77,14 @@ fi
 echo "OK   [$LABEL]: IPv6-only server diagnostic passed"
 
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+if [ ! -f "$SCRIPT_DIR/test-identity-leases.sh" ]; then
+    echo "FAIL [$LABEL]: packaged identity/lease test is missing"
+    exit 1
+fi
 if [ -x "$SCRIPT_DIR/test-identity-leases.sh" ]; then
-    "$SCRIPT_DIR/test-identity-leases.sh" "$BIN"
+    "$SCRIPT_DIR/test-identity-leases.sh" "$BIN" || exit 1
 else
-    sh "$SCRIPT_DIR/test-identity-leases.sh" "$BIN"
+    sh "$SCRIPT_DIR/test-identity-leases.sh" "$BIN" || exit 1
 fi
 
 # ---------------------------------------------------------------------------

@@ -1,3 +1,10 @@
+Release 1.3 (July 2026)
+-----------------------
+* Add protocol v3 with session-scoped sequence numbers and rolling ACKs
+* Replace the default fixed poll window with adaptive request credits
+* Probe and use direct echo replies, with automatic fallback and re-upgrade
+* Add transport unit tests and privileged failure/recovery CI coverage
+
 Release 1.2 (July 2026)
 -----------------------
 * Add persistent random client device identities

@@ -56,6 +56,24 @@ int Utility::rand()
     return ::rand();
 }
 
+uint32_t Utility::random32()
+{
+    uint32_t value = 0;
+    int randomFd = open("/dev/urandom", O_RDONLY);
+    if (randomFd != -1)
+    {
+        ssize_t length = read(randomFd, &value, sizeof(value));
+        close(randomFd);
+        if (length == (ssize_t)sizeof(value) && value != 0)
+            return value;
+    }
+
+    value = ((uint32_t)Utility::rand() << 16) ^
+            (uint32_t)Utility::rand() ^ (uint32_t)getpid() ^
+            (uint32_t)time(NULL);
+    return value == 0 ? 1 : value;
+}
+
 bool Utility::isDeviceId(const string &id)
 {
     if (id.size() != DEVICE_ID_HEX_SIZE)

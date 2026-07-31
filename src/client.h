@@ -22,7 +22,9 @@
 
 #include "worker.h"
 #include "auth.h"
+#include "transport.h"
 
+#include <map>
 #include <vector>
 
 class Client : public Worker
@@ -39,6 +41,7 @@ public:
 
     static const Worker::TunnelHeader::Magic magic;
     static const Worker::TunnelHeader::Magic v2Magic;
+    static const Worker::TunnelHeader::Magic v3Magic;
 protected:
     enum State
     {
@@ -55,6 +58,18 @@ protected:
     void handleDataFromServer(int length);
 
     void startPolling();
+    void fillPollWindow();
+    void transportTick();
+    void startDirectProbe();
+    void requestMode(uint8_t mode);
+    void switchToCredit(const char *reason);
+    bool parseTransportHeader(int &dataLength, TransportV3::Header &transport,
+                              uint16_t id, uint16_t seq);
+    void sendV3ToServer(Worker::TunnelHeader::Type type, int dataLength,
+                        uint8_t flags, bool trackPoll);
+    uint32_t echoKey(uint16_t id, uint16_t seq) const;
+    const Worker::TunnelHeader::Magic &clientMagic() const;
+    const Worker::TunnelHeader::Magic &serverMagic() const;
 
     void sendEchoToServer(Worker::TunnelHeader::Type type, int dataLength);
     void sendChallengeResponse(int dataLength);
@@ -66,12 +81,27 @@ protected:
     uint32_t clientIp;
     uint32_t desiredIp;
     std::string deviceId;
-    bool useLegacyConnectionRequest;
-    int v2ResetCount;
-    int v2RequestAttempts;
+    int protocolVersion;
+    int protocolRequestAttempts;
 
     int maxPolls;
     int pollTimeoutNr;
+    bool autoPoll;
+    int negotiatedCapabilities;
+    uint32_t sessionId;
+    uint32_t nextTransportSequence;
+    SequenceTracker receivedSequences;
+    AdaptiveCredit adaptiveCredit;
+    std::map<uint32_t, Time> outstandingPolls;
+    uint8_t transportMode;
+    uint8_t peerTransportMode;
+    bool directProbePending;
+    int directProbeReplies;
+    Time directProbeDeadline;
+    Time lastDirectProbe;
+    Time lastServerPacket;
+    Time lastTransportPing;
+    Time lastModeRequest;
 
     bool changeEchoId, changeEchoSeq;
 

@@ -18,6 +18,8 @@ for required in wintun.dll WINTUN-LICENSE.txt; do
     fi
 done
 
+make test GPP=g++
+
 make \
     CPPFLAGS='-c -g -std=gnu++98 -fpermissive -Wall -Wextra -Wno-sign-compare -Wno-missing-field-initializers -DWIN32' \
     LDFLAGS='-static'

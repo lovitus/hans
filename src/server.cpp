@@ -43,6 +43,19 @@ using std::endl;
 
 const Worker::TunnelHeader::Magic Server::magic("hans");
 const Worker::TunnelHeader::Magic Server::v2Magic("hns2");
+const Worker::TunnelHeader::Magic Server::v3Magic("hns3");
+
+namespace
+{
+    const int DIRECT_UNACKED_LIMIT = 3;
+    const int DIRECT_ACK_TIMEOUT_MS = 3000;
+
+    void put32(char *buffer, uint32_t value)
+    {
+        value = htonl(value);
+        memcpy(buffer, &value, sizeof(value));
+    }
+}
 
 Server::Server(int tunnelMtu, const string *deviceName, const string &passphrase,
                uint32_t network, bool answerEcho, uid_t uid, gid_t gid, int pollTimeout,
@@ -80,15 +93,26 @@ void Server::handleUnknownClient(const TunnelHeader &header, int dataLength, uin
     ClientData client;
     client.realIp = realIp;
     client.maxPolls = 1;
-    client.protocolV2 = header.magic == Client::v2Magic;
+    client.protocolVersion = header.magic == Client::v3Magic ? 3 :
+                             (header.magic == Client::v2Magic ? 2 : 1);
+    client.capabilities = 0;
+    client.autoPoll = false;
+    client.transportMode = TransportV3::MODE_CREDIT;
+    client.sessionId = 0;
+    client.nextTransportSequence = Utility::random32();
+    client.haveLastEcho = false;
+    client.backlogHint = 0;
+    client.state = ClientData::STATE_NEW;
 
     pollReceived(&client, echoId, echoSeq, false);
 
     if (header.type != TunnelHeader::TYPE_CONNECTION_REQUEST ||
-        (client.protocolV2 && dataLength != sizeof(ClientConnectDataV2)) ||
-        (!client.protocolV2 && dataLength != sizeof(ClientConnectData)) ||
+        (client.protocolVersion == 3 && dataLength != sizeof(ClientConnectDataV3)) ||
+        (client.protocolVersion == 2 && dataLength != sizeof(ClientConnectDataV2)) ||
+        (client.protocolVersion == 1 && dataLength != sizeof(ClientConnectData)) ||
         (dataLength != sizeof(ClientConnectData) &&
-         dataLength != sizeof(ClientConnectDataV2)))
+         dataLength != sizeof(ClientConnectDataV2) &&
+         dataLength != sizeof(ClientConnectDataV3)))
     {
         syslog(LOG_DEBUG, "invalid request (type %d) from %s", header.type,
                Utility::formatIp(realIp).c_str());
@@ -97,9 +121,11 @@ void Server::handleUnknownClient(const TunnelHeader &header, int dataLength, uin
     }
 
     ClientConnectData *connectData = (ClientConnectData *)echoReceivePayloadBuffer();
-    if (dataLength == sizeof(ClientConnectDataV2))
+    if (client.protocolVersion >= 2)
     {
         ClientConnectDataV2 *connectDataV2 =
+            client.protocolVersion == 3 ?
+            &((ClientConnectDataV3 *)echoReceivePayloadBuffer())->v2 :
             (ClientConnectDataV2 *)echoReceivePayloadBuffer();
         string receivedId(connectDataV2->deviceId, DEVICE_ID_HEX_SIZE);
         if (!Utility::isDeviceId(receivedId))
@@ -113,8 +139,27 @@ void Server::handleUnknownClient(const TunnelHeader &header, int dataLength, uin
         connectData = &connectDataV2->legacy;
     }
 
+    if (client.protocolVersion == 3)
+    {
+        ClientConnectDataV3 *connectDataV3 =
+            (ClientConnectDataV3 *)echoReceivePayloadBuffer();
+        client.capabilities = connectDataV3->capabilities &
+                              TransportV3::ALL_CAPABILITIES;
+        client.autoPoll =
+            (client.capabilities & TransportV3::CAP_ADAPTIVE_CREDIT) != 0;
+    }
+
     client.maxPolls = connectData->maxPolls;
-    client.state = ClientData::STATE_NEW;
+    if (client.autoPoll)
+    {
+        if (client.maxPolls < 2)
+            client.maxPolls = 2;
+        if (client.maxPolls > 128)
+            client.maxPolls = 128;
+    }
+    if (client.protocolVersion == 3 && !client.autoPoll &&
+        client.maxPolls == 0)
+        client.transportMode = TransportV3::MODE_DIRECT;
     client.desiredIp = connectData->desiredIp;
     bool replacingDevice = !client.deviceId.empty() &&
                            getClientByDeviceId(client.deviceId, NULL) != NULL;
@@ -202,10 +247,21 @@ void Server::checkChallenge(ClientData *client, int length)
         clientTunnelIpMap[client->tunnelIp] = clientRealIpMap[client->realIp];
     }
 
-    uint32_t *ip = (uint32_t *)echoSendPayloadBuffer();
-    *ip = htonl(client->tunnelIp);
+    char *accept = echoSendPayloadBuffer();
+    put32(accept, client->tunnelIp);
+    int acceptLength = sizeof(uint32_t);
+    if (client->protocolVersion == 3)
+    {
+        client->sessionId = Utility::random32();
+        put32(accept + 4, client->sessionId);
+        accept[8] = (char)client->capabilities;
+        accept[9] = (char)client->transportMode;
+        accept[10] = 0;
+        accept[11] = 0;
+        acceptLength = 12;
+    }
 
-    sendEchoToClient(client, TunnelHeader::TYPE_CONNECTION_ACCEPT, sizeof(uint32_t));
+    sendEchoToClient(client, TunnelHeader::TYPE_CONNECTION_ACCEPT, acceptLength);
 
     client->state = ClientData::STATE_ESTABLISHED;
     updateLease(client, true);
@@ -226,7 +282,8 @@ bool Server::handleEchoData(const TunnelHeader &header, int dataLength, uint32_t
     if (reply)
         return false;
 
-    if (header.magic != Client::magic && header.magic != Client::v2Magic)
+    if (header.magic != Client::magic && header.magic != Client::v2Magic &&
+        header.magic != Client::v3Magic)
         return false;
 
     ClientData *client = getClientByRealIp(realIp);
@@ -236,9 +293,32 @@ bool Server::handleEchoData(const TunnelHeader &header, int dataLength, uint32_t
         return true;
     }
 
+    TransportV3::Header transport;
+    if (header.type != TunnelHeader::TYPE_CONNECTION_REQUEST &&
+        client->state == ClientData::STATE_ESTABLISHED &&
+        client->protocolVersion == 3)
+    {
+        if (!parseTransportHeader(client, dataLength, transport))
+            return true;
+        processTransportAck(client, transport);
+
+        if (client->autoPoll)
+        {
+            int requested = transport.creditTarget;
+            if (requested < 2)
+                requested = 2;
+            if (requested > 128)
+                requested = 128;
+            client->maxPolls = requested;
+        }
+    }
+
+    bool isControl = header.type == TunnelHeader::TYPE_CONNECTION_REQUEST ||
+                     header.type == TunnelHeader::TYPE_DIRECT_PROBE ||
+                     header.type == TunnelHeader::TYPE_MODE_SET ||
+                     header.type == TunnelHeader::TYPE_TRANSPORT_PING;
     pollReceived(client, id, seq,
-                 client->state == ClientData::STATE_ESTABLISHED &&
-                 header.type != TunnelHeader::TYPE_CONNECTION_REQUEST);
+                 client->state == ClientData::STATE_ESTABLISHED && !isControl);
 
     switch (header.type)
     {
@@ -272,12 +352,77 @@ bool Server::handleEchoData(const TunnelHeader &header, int dataLength, uint32_t
                     return true;
                 }
 
-                sendToTun(dataLength);
+                if (client->protocolVersion == 3)
+                    tun.write(echoReceivePayloadBuffer() +
+                              TransportV3::HEADER_SIZE, dataLength);
+                else
+                    sendToTun(dataLength);
                 return true;
             }
             break;
         case TunnelHeader::TYPE_POLL:
             return true;
+        case TunnelHeader::TYPE_DIRECT_PROBE:
+            if (client->state == ClientData::STATE_ESTABLISHED &&
+                client->protocolVersion == 3 && client->autoPoll &&
+                (client->capabilities & TransportV3::CAP_DIRECT_REPLY))
+            {
+                sendDirectProbeReplies(client, id, seq);
+                return true;
+            }
+            break;
+        case TunnelHeader::TYPE_MODE_SET:
+            if (client->state == ClientData::STATE_ESTABLISHED &&
+                client->protocolVersion == 3 && dataLength == 1)
+            {
+                uint8_t requested = (uint8_t)echoReceivePayloadBuffer()
+                                    [TransportV3::HEADER_SIZE];
+                if (requested == TransportV3::MODE_DIRECT &&
+                    (client->capabilities & TransportV3::CAP_DIRECT_REPLY))
+                {
+                    client->transportMode = TransportV3::MODE_DIRECT;
+                    while (!client->pollIds.empty())
+                        client->pollIds.pop();
+                }
+                else
+                    client->transportMode = TransportV3::MODE_CREDIT;
+
+                if (client->transportMode == TransportV3::MODE_CREDIT)
+                    client->directUnacked.clear();
+                echoSendPayloadBuffer()[0] = client->transportMode;
+                sendV3ToClient(client, TunnelHeader::TYPE_MODE_ACK, 1,
+                               TransportV3::FLAG_CONTROL, true, id, seq);
+                syslog(LOG_INFO, "client %s transport mode is now %s",
+                       Utility::formatIp(realIp).c_str(),
+                       client->transportMode == TransportV3::MODE_DIRECT ?
+                       "direct" : "adaptive-credit");
+                return true;
+            }
+            break;
+        case TunnelHeader::TYPE_TRANSPORT_PING:
+            if (client->state == ClientData::STATE_ESTABLISHED &&
+                client->protocolVersion == 3)
+            {
+                if (client->transportMode == TransportV3::MODE_DIRECT &&
+                    directPathFailed(client))
+                {
+                    client->transportMode = TransportV3::MODE_CREDIT;
+                    client->directUnacked.clear();
+                    syslog(LOG_WARNING, "direct reply acknowledgements stalled for %s; falling back to adaptive credits",
+                           Utility::formatIp(realIp).c_str());
+                    echoSendPayloadBuffer()[0] = TransportV3::MODE_CREDIT;
+                    sendV3ToClient(client, TunnelHeader::TYPE_MODE_ACK, 1,
+                                   TransportV3::FLAG_CONTROL, true, id, seq);
+                }
+                else
+                {
+                    sendV3ToClient(client, TunnelHeader::TYPE_TRANSPORT_PING,
+                                   0, TransportV3::FLAG_CONTROL, true,
+                                   id, seq);
+                }
+                return true;
+            }
+            break;
         default:
             break;
     }
@@ -341,13 +486,24 @@ void Server::pollReceived(ClientData *client, uint16_t echoId, uint16_t echoSeq,
 {
     unsigned int maxSavedPolls = client->maxPolls != 0 ? client->maxPolls : 1;
 
-    client->pollIds.push(ClientData::EchoId(echoId, echoSeq));
-    if (client->pollIds.size() > maxSavedPolls)
-        client->pollIds.pop();
+    client->lastEcho = ClientData::EchoId(echoId, echoSeq);
+    client->haveLastEcho = true;
+
+    if (client->transportMode == TransportV3::MODE_CREDIT ||
+        client->protocolVersion < 3)
+    {
+        client->pollIds.push(ClientData::EchoId(echoId, echoSeq));
+        if (client->pollIds.size() > maxSavedPolls)
+            client->pollIds.pop();
+    }
     DEBUG_ONLY(cout << "poll -> " << client->pollIds.size() << endl);
 
     if (servePending && client->pendingPackets.size() > 0)
     {
+        // Report that this credit found queued work even when it consumes the
+        // last packet. Otherwise a continuously busy one-packet queue looks
+        // idle and the adaptive window never grows beyond its startup value.
+        client->backlogHint = client->pendingPackets.size();
         Packet &packet = client->pendingPackets.front();
         const TunnelHeader::Type packetType = packet.type;
         const int packetLength = packet.data.size();
@@ -372,9 +528,20 @@ void Server::pollReceived(ClientData *client, uint16_t echoId, uint16_t echoSeq,
 
 void Server::sendEchoToClient(ClientData *client, TunnelHeader::Type type, int dataLength)
 {
+    if (client->protocolVersion == 3 &&
+        client->state == ClientData::STATE_ESTABLISHED)
+    {
+        sendV3ToClient(client, type, dataLength, TransportV3::FLAG_NONE,
+                       false, 0, 0);
+        return;
+    }
+
     if (client->maxPolls == 0)
     {
-        sendEcho(client->protocolV2 ? v2Magic : magic, type, dataLength,
+        const TunnelHeader::Magic &responseMagic =
+            client->protocolVersion == 3 ? v3Magic :
+            (client->protocolVersion == 2 ? v2Magic : magic);
+        sendEcho(responseMagic, type, dataLength,
                  client->realIp, true, client->pollIds.front().id,
                  client->pollIds.front().seq);
         return;
@@ -386,7 +553,10 @@ void Server::sendEchoToClient(ClientData *client, TunnelHeader::Type type, int d
         client->pollIds.pop();
 
         DEBUG_ONLY(cout << "sending -> " << client->pollIds.size() << endl);
-        sendEcho(client->protocolV2 ? v2Magic : magic, type, dataLength,
+        const TunnelHeader::Magic &responseMagic =
+            client->protocolVersion == 3 ? v3Magic :
+            (client->protocolVersion == 2 ? v2Magic : magic);
+        sendEcho(responseMagic, type, dataLength,
                  client->realIp, true, echoId.id, echoId.seq);
         return;
     }
@@ -404,7 +574,138 @@ void Server::sendEchoToClient(ClientData *client, TunnelHeader::Type type, int d
     Packet &packet = client->pendingPackets.back();
     packet.type = type;
     packet.data.resize(dataLength);
-    memcpy(&packet.data[0], echoReceivePayloadBuffer(), dataLength);
+    if (dataLength > 0)
+        memcpy(&packet.data[0], echoSendPayloadBuffer(), dataLength);
+}
+
+void Server::sendV3ToClient(ClientData *client, TunnelHeader::Type type,
+                            int dataLength, uint8_t flags, bool forceEcho,
+                            uint16_t echoId, uint16_t echoSeq)
+{
+    ClientData::EchoId target;
+    bool direct = forceEcho ||
+                  client->transportMode == TransportV3::MODE_DIRECT;
+
+    if (forceEcho)
+        target = ClientData::EchoId(echoId, echoSeq);
+    else if (direct)
+    {
+        if (!client->haveLastEcho)
+            return;
+        target = client->lastEcho;
+    }
+    else if (!client->pollIds.empty())
+    {
+        target = client->pollIds.front();
+        client->pollIds.pop();
+    }
+    else
+    {
+        if (client->pendingPackets.size() >= MAX_V3_BUFFERED_PACKETS)
+        {
+            client->pendingPackets.pop();
+            syslog(LOG_WARNING, "packet to %s dropped",
+                   Utility::formatIp(client->tunnelIp).c_str());
+        }
+
+        client->pendingPackets.push(Packet());
+        Packet &packet = client->pendingPackets.back();
+        packet.type = type;
+        packet.data.resize(dataLength);
+        if (dataLength > 0)
+            memcpy(&packet.data[0], echoSendPayloadBuffer(), dataLength);
+        return;
+    }
+
+    char *payload = echoSendPayloadBuffer();
+    if (dataLength > 0)
+        memmove(payload + TransportV3::HEADER_SIZE, payload, dataLength);
+
+    TransportV3::Header transport;
+    transport.flags = flags | (direct ? TransportV3::FLAG_DIRECT : 0);
+    transport.mode = client->transportMode;
+    transport.creditTarget = (uint8_t)client->maxPolls;
+    transport.sessionId = client->sessionId;
+    transport.txSequence = ++client->nextTransportSequence;
+    if (transport.txSequence == 0)
+        transport.txSequence = ++client->nextTransportSequence;
+    transport.ackSequence = client->receivedSequences.ackSequence();
+    transport.ackBits = client->receivedSequences.ackBits();
+    unsigned int queuedPackets = client->pendingPackets.size();
+    if (client->backlogHint > queuedPackets)
+        queuedPackets = client->backlogHint;
+    transport.queuedPackets = queuedPackets > 65535 ? 65535 :
+                              (uint16_t)queuedPackets;
+    client->backlogHint = 0;
+    transport.timestamp = (uint16_t)((now.milliseconds() / 16) & 0xffff);
+    TransportV3::encode(payload, transport);
+
+    sendEcho(v3Magic, type, dataLength + TransportV3::HEADER_SIZE,
+             client->realIp, true, target.id, target.seq);
+
+    if (!forceEcho && client->transportMode == TransportV3::MODE_DIRECT &&
+        type == TunnelHeader::TYPE_DATA)
+        client->directUnacked[transport.txSequence] = now;
+}
+
+void Server::sendDirectProbeReplies(ClientData *client, uint16_t echoId,
+                                    uint16_t echoSeq)
+{
+    for (int i = 0; i < 3; ++i)
+        sendV3ToClient(client, TunnelHeader::TYPE_DIRECT_PROBE_REPLY, 0,
+                       TransportV3::FLAG_CONTROL, true, echoId, echoSeq);
+}
+
+bool Server::parseTransportHeader(ClientData *client, int &dataLength,
+                                  TransportV3::Header &transport)
+{
+    if (!TransportV3::decode(echoReceivePayloadBuffer(), dataLength,
+                             transport) ||
+        transport.sessionId != client->sessionId)
+    {
+        syslog(LOG_WARNING, "discarding invalid transport v3 packet from %s",
+               Utility::formatIp(client->realIp).c_str());
+        return false;
+    }
+    if (!client->receivedSequences.accept(transport.txSequence))
+        return false;
+
+    dataLength -= TransportV3::HEADER_SIZE;
+    return true;
+}
+
+void Server::processTransportAck(ClientData *client,
+                                 const TransportV3::Header &transport)
+{
+    std::map<uint32_t, Time>::iterator it = client->directUnacked.begin();
+    while (it != client->directUnacked.end())
+    {
+        std::map<uint32_t, Time>::iterator current = it++;
+        bool beyondAckWindow = transport.ackSequence != 0 &&
+                               TransportV3::sequenceAfter(
+                                   transport.ackSequence, current->first) &&
+                               transport.ackSequence - current->first > 32;
+        if (beyondAckWindow ||
+            TransportV3::acknowledged(current->first,
+                                      transport.ackSequence,
+                                      transport.ackBits))
+            client->directUnacked.erase(current);
+    }
+}
+
+bool Server::directPathFailed(ClientData *client) const
+{
+    if ((int)client->directUnacked.size() < DIRECT_UNACKED_LIMIT)
+        return false;
+
+    for (std::map<uint32_t, Time>::const_iterator it =
+             client->directUnacked.begin();
+         it != client->directUnacked.end(); ++it)
+    {
+        if (now > it->second + Time(DIRECT_ACK_TIMEOUT_MS))
+            return true;
+    }
+    return false;
 }
 
 void Server::releaseTunnelIp(uint32_t tunnelIp, const string &deviceId)

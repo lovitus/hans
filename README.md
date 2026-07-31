@@ -18,14 +18,16 @@ deployment, compatibility, and peer-management features:
 | Sticky tunnel addresses | The server remembers device-to-IP leases across reconnects and server restarts, so clients normally keep the same tunnel address without configuring `-a`. |
 | Lease retention | Offline leases are retained while unused addresses remain. When the pool is full, only the least-recently-seen offline lease is reclaimed; active peers are never evicted. |
 | Peer inspection | `hans --list-peers` shows device ID, tunnel IP, real IP, online/offline state, and last-seen time. `hans --show-device-id` displays the local persistent identity. |
-| Backward-compatible protocol | New servers still accept legacy clients. New clients try the device-identity protocol first and automatically fall back when connecting to an older server. |
+| Adaptive transport | Protocol v3 starts with conservative echo-request credits, measures reply RTT and server backlog, and adjusts the credit count instead of requiring a guessed `-w` window. |
+| Direct-reply upgrade and fallback | A client probes whether the path safely passes multiple replies for one echo request. A successful path upgrades to direct replies; sequence/ACK tracking and heartbeats automatically return it to adaptive credits if that path stops working, then probe it again after a quiet interval. |
+| Backward-compatible protocol | New servers still accept v1/v2 clients. New clients try v3, then automatically fall back to v2 and the original protocol when connecting to an older server. |
 | Broad release matrix | GitHub Actions builds Linux, macOS, Windows/Cygwin (amd64 and legacy i386), FreeBSD, OpenBSD, and NetBSD binaries for the CPU architectures supported by the codebase. |
 | Static releases | Linux and BSD release binaries are fully static. Windows compiler/C++ runtimes are embedded in the executable; macOS uses only operating-system libraries. Release binaries are stripped before their isolated package tests to avoid shipping debug symbols. |
 | Old-Linux support | Statically linked musl binaries avoid glibc version dependencies and run on systems such as CentOS 7, older distributions, embedded Linux, and Alpine. |
 | Adapter fallback | Windows prefers an installed TAP-Windows adapter and automatically falls back to bundled Wintun. Linux prefers TUN and falls back to a veth pair plus `AF_PACKET` when TUN is unavailable. Auto-created interfaces use `hans1`, then `hans2`, and so on. |
 | Safe orphan cleanup | Auto-created Linux veth pairs carry a random ownership marker. On startup Hans removes a pair only when both endpoints and markers match exactly and no live process still owns it; ambiguous interfaces are always retained. |
 | Runtime packaging | Windows compiler and C++ runtimes are linked into `hans.exe`; the package includes the unavoidable `cygwin1.dll` and the signed official `wintun.dll`, allowing use without a separate Cygwin installation. |
-| Automated validation | Every build checks version/help output and persistent identity/lease commands, then repeats those checks from an isolated product directory without the compiler or development environment. Environments with root and TUN support additionally attempt a real client/server tunnel connection. |
+| Automated validation | Every build runs transport codec, sequence/ACK, and adaptive-window tests plus version/help and identity/lease checks. The stripped package is then tested from an isolated product directory. Privileged Linux CI also verifies automatic direct mode, bidirectional TCP throughput, forced reply-path failure, credit fallback, recovery, and re-upgrade. |
 | Continuous releases | Successful builds are collected and published automatically on the [Releases page](../../releases). |
 
 ## How it works
@@ -40,6 +42,12 @@ deployment, compatibility, and peer-management features:
 - New clients also send a persistent random device ID. The server uses it for
   sticky leases, so a peer normally receives the same tunnel IP after changing
   networks or reconnecting.
+- Protocol v3 does not use a fixed receive window by default. It begins with a
+  small set of echo-request credits and grows or shrinks that set using measured
+  RTT and queued work. It also probes for safe multi-reply delivery and uses
+  direct replies when possible. Every v3 packet carries a session ID, sequence,
+  rolling ACK bitmap, and queue feedback; missed direct heartbeats trigger a
+  conservative credit-mode fallback, with a later probe to recover direct mode.
 - **Server mode is Linux-only** (it relies on Linux-specific networking
   behavior). **Client mode** works on Linux, FreeBSD, OpenBSD, NetBSD, macOS
   and Windows (via Cygwin).
@@ -89,6 +97,7 @@ Requires `gcc`/`g++` (or `clang`'s `cc`/`c++`) and `make`:
 
 ```sh
 make
+make test
 ```
 
 This produces a `hans` binary (or `hans.exe` on Windows/Cygwin) in the
@@ -249,8 +258,9 @@ the same value explicitly; no software-only identity can survive loss of all
 locally persisted state.
 
 Servers accept legacy clients without a device ID (those clients continue to
-receive non-sticky leases). New clients automatically fall back to the legacy
-connection request when talking to an older server.
+receive non-sticky leases). New clients negotiate protocol v3 first and
+automatically fall back through v2 to the original connection request when
+talking to an older server.
 
 ## Make the server also answer normal pings
 
@@ -266,7 +276,8 @@ sudo ./hans -s 10.0.0.0 -p secret -r
 | Flag | Purpose |
 | --- | --- |
 | `-m mtu` | Reference MTU of the path between client and server (default `1500`). Must match on both sides. Lower it if you see fragmentation/connectivity issues on constrained links. |
-| `-w polls` | Number of echo requests the client pre-sends for the server to piggy-back replies on (default `10`, `0` disables polling). This chiefly limits server-to-client throughput, so increase it gradually on high-latency links (for example `30`, then `60`); larger values create more in-flight ICMP traffic. Set it to `0` only if the network allows unlimited unsolicited echo replies. |
+| `-w auto` | Default. Negotiate v3 adaptive credits, probe direct replies, automatically downgrade on failure, and retry the direct path later. Usually no tuning is needed. |
+| `-w polls` | Force the old fixed credit count for diagnostics or a known path. `0` forces direct replies and intentionally disables automatic fallback; prefer `auto` for normal use. |
 | `-i` | Change the ICMP echo **id** on every request (client only). Helps with routers/firewalls that get confused by a static id. |
 | `-q` | Change the ICMP echo **sequence number** on every request (client only). Same rationale as `-i`. |
 | `-d device` | Force a specific virtual interface name instead of auto-selecting `hans1`, `hans2`, and so on. |
@@ -297,7 +308,7 @@ sudo systemctl enable --now hans-server
 ```
 RUN AS CLIENT
   hans -c server [-fv] [-p passphrase] [-u user] [-d tun_device]
-       [-m reference_mtu] [-w polls] [--device-id id]
+       [-m reference_mtu] [-w auto|polls] [--device-id id]
        [--device-id-file path]
 
 RUN AS SERVER (linux only)
@@ -324,7 +335,7 @@ ARGUMENTS
   -r            Respond to ordinary pings in server mode.
   -d device     Use given tun device.
   -m mtu        Set maximum echo packet size (default 1500, must match on both ends).
-  -w polls      Number of pre-sent echo requests for polling (default 10, 0 disables).
+  -w auto|polls Adaptive credits/direct probing by default; a number forces a fixed window.
   -i            Change echo id on every echo request (client only).
   -q            Change echo sequence number on every echo request (client only).
   -f            Run in foreground.
@@ -334,6 +345,5 @@ ARGUMENTS
 ## CI/CD
 
 See `.github/workflows/build-and-release.yml` for the full build matrix,
-smoke tests (version/help checks are mandatory; a real client/server
-loopback connection is attempted wherever the sandbox has root + a TUN
-device, and gracefully exempted otherwise), and the automatic release step.
+protocol unit tests, isolated stripped-package tests, privileged transport
+failure/recovery tests, and the automatic release step.

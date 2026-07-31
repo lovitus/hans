@@ -23,6 +23,7 @@
 #include "worker.h"
 #include "auth.h"
 #include "config.h"
+#include "transport.h"
 
 #include <map>
 #include <queue>
@@ -54,8 +55,18 @@ public:
         char deviceId[DEVICE_ID_HEX_SIZE];
     };
 
+    struct ClientConnectDataV3
+    {
+        ClientConnectDataV2 v2;
+        uint8_t capabilities;
+        uint8_t minimumPolls;
+        uint8_t maximumPolls;
+        uint8_t reserved;
+    };
+
     static const TunnelHeader::Magic magic;
     static const TunnelHeader::Magic v2Magic;
+    static const TunnelHeader::Magic v3Magic;
 
 protected:
     struct Packet
@@ -75,6 +86,7 @@ protected:
 
         struct EchoId
         {
+            EchoId() { id = 0; seq = 0; }
             EchoId(uint16_t id, uint16_t seq) { this->id = id; this->seq = seq; }
 
             uint16_t id;
@@ -85,7 +97,17 @@ protected:
         uint32_t tunnelIp;
         uint32_t desiredIp;
         std::string deviceId;
-        bool protocolV2;
+        int protocolVersion;
+        int capabilities;
+        bool autoPoll;
+        uint8_t transportMode;
+        uint32_t sessionId;
+        uint32_t nextTransportSequence;
+        SequenceTracker receivedSequences;
+        EchoId lastEcho;
+        bool haveLastEcho;
+        std::map<uint32_t, Time> directUnacked;
+        unsigned int backlogHint;
 
         std::queue<Packet> pendingPackets;
 
@@ -129,6 +151,16 @@ protected:
     void sendReset(ClientData *client);
 
     void sendEchoToClient(ClientData *client, TunnelHeader::Type type, int dataLength);
+    void sendV3ToClient(ClientData *client, TunnelHeader::Type type,
+                        int dataLength, uint8_t flags, bool forceEcho,
+                        uint16_t echoId, uint16_t echoSeq);
+    void sendDirectProbeReplies(ClientData *client, uint16_t echoId,
+                                uint16_t echoSeq);
+    bool parseTransportHeader(ClientData *client, int &dataLength,
+                              TransportV3::Header &transport);
+    void processTransportAck(ClientData *client,
+                             const TransportV3::Header &transport);
+    bool directPathFailed(ClientData *client) const;
 
     void pollReceived(ClientData *client, uint16_t echoId, uint16_t echoSeq,
                       bool servePending);

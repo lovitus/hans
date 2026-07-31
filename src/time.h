@@ -21,6 +21,7 @@
 #define TIME_H
 
 #include <sys/time.h>
+#include <stdint.h>
 
 class Time
 {
@@ -37,6 +38,11 @@ public:
     bool operator==(const Time &other) const;
     bool operator<(const Time &other) const;
     bool operator>(const Time &other) const;
+
+    int64_t milliseconds() const
+    {
+        return (int64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000;
+    }
 
     static Time now();
 
