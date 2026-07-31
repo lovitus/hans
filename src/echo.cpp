@@ -22,6 +22,282 @@
 
 #include <sys/socket.h>
 #include <sys/types.h>
+
+#ifdef WIN32
+#include <w32api/windows.h>
+#include <pthread.h>
+#include <fcntl.h>
+#include <deque>
+
+namespace
+{
+    struct HansIpOptionInformation
+    {
+        unsigned char ttl;
+        unsigned char tos;
+        unsigned char flags;
+        unsigned char optionsSize;
+        unsigned char *optionsData;
+    };
+
+    struct HansIcmpEchoReply
+    {
+        DWORD address;
+        DWORD status;
+        DWORD roundTripTime;
+        unsigned short dataSize;
+        unsigned short reserved;
+        void *data;
+        HansIpOptionInformation options;
+    };
+
+    const DWORD HANS_IP_SUCCESS = 0;
+    const int HANS_WINDOWS_MAX_PENDING = 60;
+}
+
+class Echo::WindowsBackend
+{
+public:
+    struct Request
+    {
+        std::vector<char> payload;
+        std::vector<char> replyBuffer;
+        uint32_t realIp;
+        uint16_t id;
+        uint16_t seq;
+        HANDLE event;
+    };
+
+    typedef HANDLE (WINAPI *CreateFileFunction)(void);
+    typedef BOOL (WINAPI *CloseHandleFunction)(HANDLE);
+    typedef DWORD (WINAPI *SendEchoFunction)(HANDLE, HANDLE, FARPROC, void *,
+                                              DWORD, void *, unsigned short,
+                                              HansIpOptionInformation *, void *,
+                                              DWORD, DWORD);
+
+    WindowsBackend(int maxPayloadSize)
+        : library(NULL), icmpHandle(INVALID_HANDLE_VALUE), wakeEvent(NULL),
+          stopping(false), threadStarted(false), createFileFunction(NULL),
+          closeHandleFunction(NULL), sendEchoFunction(NULL)
+    {
+        pipeFds[0] = pipeFds[1] = -1;
+        library = LoadLibraryA("iphlpapi.dll");
+        if (library == NULL)
+            throw Exception("loading Windows ICMP API", true);
+        createFileFunction = reinterpret_cast<CreateFileFunction>(
+            GetProcAddress(library, "IcmpCreateFile"));
+        closeHandleFunction = reinterpret_cast<CloseHandleFunction>(
+            GetProcAddress(library, "IcmpCloseHandle"));
+        sendEchoFunction = reinterpret_cast<SendEchoFunction>(
+            GetProcAddress(library, "IcmpSendEcho2"));
+        if (createFileFunction == NULL || closeHandleFunction == NULL ||
+            sendEchoFunction == NULL)
+            throw Exception("resolving Windows ICMP API");
+
+        icmpHandle = createFileFunction();
+        if (icmpHandle == INVALID_HANDLE_VALUE)
+            throw Exception("creating Windows ICMP handle", true);
+        wakeEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
+        if (wakeEvent == NULL || pipe(pipeFds) != 0)
+            throw Exception("creating Windows ICMP notification channel", true);
+        fcntl(pipeFds[0], F_SETFL, fcntl(pipeFds[0], F_GETFL, 0) | O_NONBLOCK);
+        fcntl(pipeFds[1], F_SETFL, fcntl(pipeFds[1], F_GETFL, 0) | O_NONBLOCK);
+        pthread_mutex_init(&mutex, NULL);
+        if (pthread_create(&thread, NULL, threadEntry, this) != 0)
+            throw Exception("creating Windows ICMP worker", true);
+        threadStarted = true;
+        (void)maxPayloadSize;
+    }
+
+    ~WindowsBackend()
+    {
+        pthread_mutex_lock(&mutex);
+        stopping = true;
+        pthread_mutex_unlock(&mutex);
+        if (wakeEvent != NULL)
+            SetEvent(wakeEvent);
+        if (threadStarted)
+            pthread_join(thread, NULL);
+
+        clearRequests(queued);
+        clearRequests(active);
+        clearRequests(completed);
+        if (pipeFds[0] >= 0)
+            close(pipeFds[0]);
+        if (pipeFds[1] >= 0)
+            close(pipeFds[1]);
+        if (wakeEvent != NULL)
+            CloseHandle(wakeEvent);
+        if (icmpHandle != INVALID_HANDLE_VALUE && closeHandleFunction != NULL)
+            closeHandleFunction(icmpHandle);
+        if (library != NULL)
+            FreeLibrary(library);
+        pthread_mutex_destroy(&mutex);
+    }
+
+    int getFd() const
+    {
+        return pipeFds[0];
+    }
+
+    void send(const char *payload, int length, uint32_t realIp,
+              uint16_t id, uint16_t seq)
+    {
+        Request *request = new Request;
+        request->payload.assign(payload, payload + length);
+        request->replyBuffer.resize(sizeof(HansIcmpEchoReply) + length + 32);
+        request->realIp = realIp;
+        request->id = id;
+        request->seq = seq;
+        request->event = CreateEvent(NULL, FALSE, FALSE, NULL);
+        if (request->event == NULL)
+        {
+            delete request;
+            return;
+        }
+        pthread_mutex_lock(&mutex);
+        queued.push_back(request);
+        pthread_mutex_unlock(&mutex);
+        SetEvent(wakeEvent);
+    }
+
+    bool receive(std::vector<char> &payload, uint32_t &realIp,
+                 uint16_t &id, uint16_t &seq)
+    {
+        char notification;
+        read(pipeFds[0], &notification, 1);
+        pthread_mutex_lock(&mutex);
+        if (completed.empty())
+        {
+            pthread_mutex_unlock(&mutex);
+            return false;
+        }
+        Request *request = completed.front();
+        completed.pop_front();
+        pthread_mutex_unlock(&mutex);
+
+        HansIcmpEchoReply *reply = reinterpret_cast<HansIcmpEchoReply *>(
+            &request->replyBuffer[0]);
+        bool valid = reply->status == HANS_IP_SUCCESS && reply->data != NULL;
+        if (valid)
+        {
+            const char *data = static_cast<const char *>(reply->data);
+            payload.assign(data, data + reply->dataSize);
+            realIp = ntohl(reply->address);
+            id = request->id;
+            seq = request->seq;
+        }
+        CloseHandle(request->event);
+        delete request;
+        return valid;
+    }
+
+private:
+    static void *threadEntry(void *context)
+    {
+        static_cast<WindowsBackend *>(context)->run();
+        return NULL;
+    }
+
+    void startQueued()
+    {
+        while (active.size() < HANS_WINDOWS_MAX_PENDING)
+        {
+            pthread_mutex_lock(&mutex);
+            if (queued.empty())
+            {
+                pthread_mutex_unlock(&mutex);
+                break;
+            }
+            Request *request = queued.front();
+            queued.pop_front();
+            pthread_mutex_unlock(&mutex);
+
+            DWORD result = sendEchoFunction(
+                icmpHandle, request->event, NULL, NULL, htonl(request->realIp),
+                request->payload.empty() ? NULL : &request->payload[0],
+                (unsigned short)request->payload.size(), NULL,
+                &request->replyBuffer[0], (DWORD)request->replyBuffer.size(),
+                2000);
+            if (result > 0)
+                complete(request);
+            else if (GetLastError() == ERROR_IO_PENDING)
+                active.push_back(request);
+            else
+            {
+                CloseHandle(request->event);
+                delete request;
+            }
+        }
+    }
+
+    void complete(Request *request)
+    {
+        pthread_mutex_lock(&mutex);
+        completed.push_back(request);
+        pthread_mutex_unlock(&mutex);
+        char notification = 1;
+        write(pipeFds[1], &notification, 1);
+    }
+
+    void run()
+    {
+        while (true)
+        {
+            pthread_mutex_lock(&mutex);
+            bool shouldStop = stopping;
+            pthread_mutex_unlock(&mutex);
+            if (shouldStop)
+                break;
+
+            startQueued();
+            std::vector<HANDLE> handles;
+            handles.push_back(wakeEvent);
+            for (size_t i = 0; i < active.size(); ++i)
+                handles.push_back(active[i]->event);
+            DWORD result = WaitForMultipleObjects((DWORD)handles.size(),
+                                                   &handles[0], FALSE, INFINITE);
+            if (result == WAIT_OBJECT_0)
+            {
+                ResetEvent(wakeEvent);
+                continue;
+            }
+            size_t index = (size_t)(result - WAIT_OBJECT_0);
+            if (index >= 1 && index <= active.size())
+            {
+                Request *request = active[index - 1];
+                active.erase(active.begin() + index - 1);
+                complete(request);
+            }
+        }
+    }
+
+    void clearRequests(std::deque<Request *> &requests)
+    {
+        while (!requests.empty())
+        {
+            CloseHandle(requests.front()->event);
+            delete requests.front();
+            requests.pop_front();
+        }
+    }
+
+    HMODULE library;
+    HANDLE icmpHandle;
+    HANDLE wakeEvent;
+    int pipeFds[2];
+    pthread_t thread;
+    pthread_mutex_t mutex;
+    bool stopping;
+    bool threadStarted;
+    CreateFileFunction createFileFunction;
+    CloseHandleFunction closeHandleFunction;
+    SendEchoFunction sendEchoFunction;
+    std::deque<Request *> queued;
+    std::deque<Request *> active;
+    std::deque<Request *> completed;
+};
+#endif
 #include <netinet/in_systm.h>
 #include <netinet/in.h>
 #include <netinet/ip.h>
@@ -35,11 +311,42 @@
 
 typedef ip IpHeader;
 
-Echo::Echo(int maxPayloadSize)
+Echo::Echo(int maxPayloadSize, bool preferUnprivileged)
 {
-    fd = socket(AF_INET, SOCK_RAW, IPPROTO_ICMP);
+    datagramSocket = false;
+    fd = -1;
+#ifdef WIN32
+    windowsBackend = NULL;
+    if (preferUnprivileged)
+    {
+        windowsBackend = new WindowsBackend(maxPayloadSize);
+        fd = windowsBackend->getFd();
+        bufferSize = maxPayloadSize + headerSize();
+        sendBuffer.resize(bufferSize);
+        receiveBuffer.resize(bufferSize);
+        syslog(LOG_INFO, "using Windows ICMP helper API");
+        return;
+    }
+#endif
+
+    if (preferUnprivileged)
+    {
+        fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_ICMP);
+        if (fd >= 0)
+        {
+            datagramSocket = true;
+            syslog(LOG_INFO, "using unprivileged ICMP ping socket");
+        }
+    }
+
     if (fd == -1)
+        fd = socket(AF_INET, SOCK_RAW, IPPROTO_ICMP);
+    if (fd == -1)
+    {
+        if (preferUnprivileged)
+            throw Exception("creating ICMP socket (the OS did not permit either a ping socket or a raw socket)", true);
         throw Exception("creating icmp socket", true);
+    }
 
     bufferSize = maxPayloadSize + headerSize();
     sendBuffer.resize(bufferSize);
@@ -48,6 +355,13 @@ Echo::Echo(int maxPayloadSize)
 
 Echo::~Echo()
 {
+#ifdef WIN32
+    if (windowsBackend != NULL)
+    {
+        delete windowsBackend;
+        return;
+    }
+#endif
     close(fd);
 }
 
@@ -58,6 +372,17 @@ int Echo::headerSize()
 
 void Echo::send(int payloadLength, uint32_t realIp, bool reply, uint16_t id, uint16_t seq)
 {
+#ifdef WIN32
+    if (windowsBackend != NULL)
+    {
+        if (reply)
+            syslog(LOG_WARNING, "Windows ICMP helper cannot send echo replies");
+        else
+            windowsBackend->send(sendPayloadBuffer(), payloadLength,
+                                 realIp, id, seq);
+        return;
+    }
+#endif
     struct sockaddr_in target;
     target.sin_family = AF_INET;
     target.sin_addr.s_addr = htonl(realIp);
@@ -80,14 +405,44 @@ void Echo::send(int payloadLength, uint32_t realIp, bool reply, uint16_t id, uin
 
 int Echo::receive(uint32_t &realIp, bool &reply, uint16_t &id, uint16_t &seq)
 {
+#ifdef WIN32
+    if (windowsBackend != NULL)
+    {
+        std::vector<char> payload;
+        if (!windowsBackend->receive(payload, realIp, id, seq))
+            return -1;
+        if (payload.size() + headerSize() > receiveBuffer.size())
+            return -1;
+        memcpy(receivePayloadBuffer(), &payload[0], payload.size());
+        reply = true;
+        return (int)payload.size();
+    }
+#endif
     struct sockaddr_in source;
     int source_addr_len = sizeof(struct sockaddr_in);
 
-    int dataLength = recvfrom(fd, receiveBuffer.data(), bufferSize, 0, (struct sockaddr *)&source, (socklen_t *)&source_addr_len);
+    char *target = receiveBuffer.data();
+    int dataLength = recvfrom(fd, target, bufferSize, 0,
+                              (struct sockaddr *)&source,
+                              (socklen_t *)&source_addr_len);
     if (dataLength == -1)
     {
         syslog(LOG_ERR, "error receiving icmp packet: %s", strerror(errno));
         return -1;
+    }
+
+    if (datagramSocket)
+    {
+        bool includesIpHeader = dataLength >= (int)sizeof(IpHeader) &&
+                                (((unsigned char)target[0] >> 4) == 4);
+        if (!includesIpHeader)
+        {
+            if (dataLength + (int)sizeof(IpHeader) > bufferSize)
+                return -1;
+            memmove(target + sizeof(IpHeader), target, dataLength);
+            memset(target, 0, sizeof(IpHeader));
+            dataLength += sizeof(IpHeader);
+        }
     }
 
     if (dataLength < sizeof(IpHeader) + sizeof(EchoHeader))

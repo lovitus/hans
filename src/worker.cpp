@@ -50,9 +50,11 @@ bool Worker::TunnelHeader::Magic::operator!=(const Magic &other) const
 }
 
 Worker::Worker(int tunnelMtu, const std::string *deviceName, bool answerEcho,
-               uid_t uid, gid_t gid)
-    : echo(tunnelMtu + sizeof(TunnelHeader) + TransportV3::HEADER_SIZE),
-      tun(deviceName, tunnelMtu)
+               uid_t uid, gid_t gid, bool createTun,
+               bool preferUnprivilegedEcho)
+    : echo(tunnelMtu + sizeof(TunnelHeader) + TransportV3::HEADER_SIZE,
+           preferUnprivilegedEcho),
+      tun(deviceName, tunnelMtu, createTun)
 {
     this->tunnelMtu = tunnelMtu;
     this->answerEcho = answerEcho;
@@ -93,27 +95,42 @@ void Worker::run()
     now = Time::now();
     alive = true;
 
-    int maxFd = echo.getFd() > tun.getFd() ? echo.getFd() : tun.getFd();
-
     while (alive)
     {
-        fd_set fs;
+        fd_set readSet;
+        fd_set writeSet;
         Time timeout;
 
-        FD_ZERO(&fs);
-        FD_SET(tun.getFd(), &fs);
-        FD_SET(echo.getFd(), &fs);
-
-        if (nextTimeout != Time::ZERO)
+        FD_ZERO(&readSet);
+        FD_ZERO(&writeSet);
+        int maxFd = echo.getFd();
+        FD_SET(echo.getFd(), &readSet);
+        if (tun.getFd() >= 0)
         {
-            timeout = nextTimeout - now;
+            FD_SET(tun.getFd(), &readSet);
+            if (tun.getFd() > maxFd)
+                maxFd = tun.getFd();
+        }
+        maxFd = addFileDescriptors(readSet, writeSet, maxFd);
+
+        Time wakeAt = nextTimeout;
+        int idleMs = idleIntervalMilliseconds();
+        if (idleMs >= 0)
+        {
+            Time idleAt = now + Time(idleMs);
+            if (wakeAt == Time::ZERO || idleAt < wakeAt)
+                wakeAt = idleAt;
+        }
+        if (wakeAt != Time::ZERO)
+        {
+            timeout = wakeAt - now;
             if (timeout < Time::ZERO)
                 timeout = Time::ZERO;
         }
 
         // wait for data or timeout
-        timeval *timeval = nextTimeout != Time::ZERO ? &timeout.getTimeval() : NULL;
-        int result = select(maxFd + 1 , &fs, NULL, NULL, timeval);
+        timeval *timeval = wakeAt != Time::ZERO ? &timeout.getTimeval() : NULL;
+        int result = select(maxFd + 1, &readSet, &writeSet, NULL, timeval);
         if (result == -1)
         {
             if (alive)
@@ -123,16 +140,8 @@ void Worker::run()
         }
         now = Time::now();
 
-        // timeout
-        if (result == 0)
-        {
-            nextTimeout = Time::ZERO;
-            handleTimeout();
-            continue;
-        }
-
         // icmp data
-        if (FD_ISSET(echo.getFd(), &fs))
+        if (FD_ISSET(echo.getFd(), &readSet))
         {
             bool reply;
             uint16_t id, seq;
@@ -164,7 +173,7 @@ void Worker::run()
         }
 
         // data from tun
-        if (FD_ISSET(tun.getFd(), &fs))
+        if (tun.getFd() >= 0 && FD_ISSET(tun.getFd(), &readSet))
         {
             uint32_t sourceIp, destIp;
 
@@ -175,6 +184,16 @@ void Worker::run()
 
             if (dataLength != -1)
                 handleTunData(dataLength, sourceIp, destIp);
+        }
+
+        handleFileDescriptors(readSet, writeSet);
+        handleIdle();
+
+        if (nextTimeout != Time::ZERO &&
+            (now > nextTimeout || now == nextTimeout))
+        {
+            nextTimeout = Time::ZERO;
+            handleTimeout();
         }
     }
 }
@@ -215,6 +234,20 @@ bool Worker::handleEchoData(const TunnelHeader &, int, uint32_t, bool, uint16_t,
 void Worker::handleTunData(int, uint32_t, uint32_t) { }
 
 void Worker::handleTimeout() { }
+
+int Worker::addFileDescriptors(fd_set &, fd_set &, int maxFd)
+{
+    return maxFd;
+}
+
+void Worker::handleFileDescriptors(fd_set &, fd_set &) { }
+
+int Worker::idleIntervalMilliseconds() const
+{
+    return -1;
+}
+
+void Worker::handleIdle() { }
 
 char *Worker::echoSendPayloadBuffer()
 {

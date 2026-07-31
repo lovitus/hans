@@ -61,6 +61,8 @@ jobs:
           cp hans "dist/${{ matrix.label }}/hans"
           cp scripts/test-hans.sh "dist/${{ matrix.label }}/test-hans.sh"
           cp scripts/test-identity-leases.sh "dist/${{ matrix.label }}/test-identity-leases.sh"
+          cp scripts/test-userspace.sh "dist/${{ matrix.label }}/test-userspace.sh"
+          cp scripts/test-socks5-udp.py "dist/${{ matrix.label }}/test-socks5-udp.py"
           docker run --rm \
             -e HANS_SKIP_CONNECTION_TEST=1 \
             -v "${{ github.workspace }}/dist/${{ matrix.label }}:/product:ro" \
@@ -306,6 +308,20 @@ jobs:
               kill -0 "$server_pid"
               kill -0 "$client_pid"
             '
+      - name: Test packaged unprivileged userspace networking
+        if: matrix.label == 'amd64-ubuntu24.04'
+        run: |
+          docker run --rm --privileged \
+            -v "${{ github.workspace }}/dist/${{ matrix.label }}:/product:ro" \
+            "${{ matrix.runtime_image }}" \
+            bash -c '
+              set -e
+              apt-get update -qq
+              DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+                curl iproute2 python3 util-linux
+              chmod +x /product/test-userspace.sh
+              /product/test-userspace.sh /product/hans
+            '
       - uses: actions/upload-artifact@v4
         with:
           name: hans-linux-${{ matrix.label }}
@@ -511,6 +527,19 @@ jobs:
             HANS_SKIP_CONNECTION_TEST=1 \
             sh "$(pwd)/dist/${{ matrix.label }}/test-hans.sh" \
               "$(pwd)/dist/${{ matrix.label }}/hans" "macos-${{ matrix.label }}-packaged"
+          state="$RUNNER_TEMP/hans-userspace-${{ matrix.label }}"
+          mkdir -p "$state"
+          HANS_STATE_DIR="$state" "$(pwd)/dist/${{ matrix.label }}/hans" \
+            -c 127.0.0.1 -p userspace-smoke -f -v \
+            --feature userspace --socks5 127.0.0.1:19080 \
+            >"$state/stdout" 2>"$state/stderr" &
+          userspace_pid=$!
+          sleep 2
+          kill "$userspace_pid"
+          wait "$userspace_pid" 2>/dev/null || true
+          grep -q "using unprivileged ICMP ping socket" "$state/stderr"
+          grep -q "SOCKS5 listening on 127.0.0.1:19080" "$state/stderr"
+          ! grep -q "opened tunnel device" "$state/stderr"
       - uses: actions/upload-artifact@v4
         with:
           name: hans-macos-${{ matrix.label }}
@@ -638,6 +667,29 @@ jobs:
             throw "Packaged hans.exe failed peer-list test: $peers"
           }
 
+          # Userspace mode must start through the Windows ICMP Helper API and
+          # must not load or create a TAP/Wintun adapter.
+          $userOut = Join-Path $state 'userspace.out'
+          $userErr = Join-Path $state 'userspace.err'
+          $userProbe = Start-Process -FilePath $exe `
+            -ArgumentList @('-c', '127.0.0.1', '-p', 'hans-userspace-ci', '-f', '-v', '--feature', 'userspace', '--socks5', '127.0.0.1:19080') `
+            -RedirectStandardOutput $userOut `
+            -RedirectStandardError $userErr `
+            -PassThru
+          Start-Sleep -Seconds 3
+          if ($userProbe.HasExited) {
+            $userText = (Get-Content $userOut, $userErr -Raw -ErrorAction SilentlyContinue) -join "`n"
+            throw "Packaged userspace client exited unexpectedly: $userText"
+          }
+          $userProbe.Kill($true)
+          $userProbe.WaitForExit()
+          $userText = (Get-Content $userOut, $userErr -Raw -ErrorAction SilentlyContinue) -join "`n"
+          if ($userText -notmatch 'using Windows ICMP helper API' -or
+              $userText -notmatch 'SOCKS5 listening on 127\.0\.0\.1:19080' -or
+              $userText -match 'TAP|Wintun|tunnel device') {
+            throw "Packaged userspace mode did not remain adapter-free: $userText"
+          }
+
           # Exercise the stripped package after the full toolchain has been
           # removed. With no TAP adapter, the bundled Wintun fallback must
           # create an adapter and keep the client alive long enough to connect.
@@ -666,6 +718,7 @@ jobs:
             dist/windows-${{ matrix.arch }}/cygwin1.dll
             dist/windows-${{ matrix.arch }}/wintun.dll
             dist/windows-${{ matrix.arch }}/WINTUN-LICENSE.txt
+            dist/windows-${{ matrix.arch }}/LWIP-LICENSE.txt
 
   # ---------------------------------------------------------------------
   # FreeBSD: amd64, aarch64, riscv64, powerpc64 across kernel releases.
@@ -861,6 +914,7 @@ jobs:
       - build-netbsd
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
@@ -877,7 +931,8 @@ jobs:
               (
                 cd "$d"
                 zip -q "$GITHUB_WORKSPACE/release/$name.zip" \
-                  hans.exe cygwin1.dll wintun.dll WINTUN-LICENSE.txt
+                  hans.exe cygwin1.dll wintun.dll WINTUN-LICENSE.txt \
+                  LWIP-LICENSE.txt
               )
               continue
             fi
@@ -891,6 +946,7 @@ jobs:
               fi
             done
           done
+          cp third_party/lwip/COPYING release/LWIP-LICENSE.txt
           ls -la release
 
       - name: Determine release tag

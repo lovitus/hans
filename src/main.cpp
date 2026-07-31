@@ -21,6 +21,7 @@
 #include "server.h"
 #include "exception.h"
 #include "utility.h"
+#include "userspace.h"
 
 #include <iostream>
 #include <arpa/inet.h>
@@ -44,6 +45,7 @@
 #endif
 
 using std::string;
+using std::vector;
 
 static Worker *worker = NULL;
 
@@ -64,11 +66,12 @@ static void sig_int_handler(int)
 static void usage()
 {
     std::cerr <<
-        "Hans - IP over ICMP version 1.3\n\n"
+        "Hans - IP over ICMP version 1.4\n\n"
         "RUN AS CLIENT\n"
         "  hans -c server [-fv] [-p passphrase] [-u user] [-d tun_device]\n"
         "       [-m reference_mtu] [-w auto|polls] [--device-id id]\n"
-        "       [--device-id-file path]\n\n"
+        "       [--device-id-file path] [--feature userspace]\n"
+        "       [--socks5 IPv4:port] [--shareports mappings]\n\n"
         "RUN AS SERVER (linux only)\n"
         "  hans -s network [-fvr] [-p passphrase] [-u user] [-d tun_device]\n"
         "       [-m reference_mtu] [--lease-file path]\n\n"
@@ -100,6 +103,13 @@ static void usage()
         "                routers. May impact performance with others.\n"
         "  -q            Change echo sequence number on every echo request. May help with\n"
         "                buggy routers. May impact performance with others.\n"
+        "  --feature userspace\n"
+        "                Run the client without TUN/TAP and use the embedded TCP/IP stack.\n"
+        "  --socks5 ip:port\n"
+        "                Listen for SOCKS5 CONNECT and UDP ASSOCIATE requests.\n"
+        "  --shareports mappings\n"
+        "                Share VPN ports. A plain port maps to 127.0.0.1:same-port;\n"
+        "                use listen-port=target-ip:target-port to override it.\n"
         "  -f            Run in foreground.\n"
         "  -v            Print debug information.\n";
 }
@@ -128,15 +138,22 @@ int main(int argc, char *argv[])
     string leaseFile = Utility::defaultStateFile("leases");
     bool listPeers = false;
     bool showDeviceId = false;
+    bool userspace = false;
+    string socksAddress;
+    vector<SharePort> sharePorts;
 
     openlog(argv[0], LOG_PERROR, LOG_DAEMON);
 
+    enum { OPTION_FEATURE = 1000, OPTION_SOCKS5, OPTION_SHAREPORTS };
     static struct option longOptions[] = {
         {"device-id", required_argument, NULL, 'I'},
         {"device-id-file", required_argument, NULL, 'k'},
         {"lease-file", required_argument, NULL, 'j'},
         {"list-peers", no_argument, NULL, 'l'},
         {"show-device-id", no_argument, NULL, 'o'},
+        {"feature", required_argument, NULL, OPTION_FEATURE},
+        {"socks5", required_argument, NULL, OPTION_SOCKS5},
+        {"shareports", required_argument, NULL, OPTION_SHAREPORTS},
         {NULL, 0, NULL, 0}
     };
 
@@ -217,6 +234,27 @@ int main(int argc, char *argv[])
             case 'o':
                 showDeviceId = true;
                 break;
+            case OPTION_FEATURE:
+                if (strcmp(optarg, "userspace") != 0)
+                {
+                    std::cerr << "unknown feature: " << optarg << "\n";
+                    return 1;
+                }
+                userspace = true;
+                break;
+            case OPTION_SOCKS5:
+                socksAddress = optarg;
+                break;
+            case OPTION_SHAREPORTS:
+            {
+                string error;
+                if (!UserspaceNetwork::parseSharePorts(optarg, sharePorts, error))
+                {
+                    std::cerr << "invalid --shareports: " << error << "\n";
+                    return 1;
+                }
+                break;
+            }
             default:
                 usage();
                 return 1;
@@ -263,7 +301,10 @@ int main(int argc, char *argv[])
     if ((isClient == isServer) ||
         (isServer && network == INADDR_NONE) ||
         (maxPolls < -1 || maxPolls > 255) ||
-        (isServer && (changeEchoSeq || changeEchoId)))
+        (isServer && (changeEchoSeq || changeEchoId)) ||
+        (userspace && (!isClient || (socksAddress.empty() && sharePorts.empty()))) ||
+        (!userspace && (!socksAddress.empty() || !sharePorts.empty())) ||
+        (userspace && !device.empty()))
     {
         usage();
         return 1;
@@ -357,7 +398,8 @@ int main(int argc, char *argv[])
 
             worker = new Client(mtu, device.empty() ? NULL : &device,
                                 ntohl(serverIp), maxPolls, passphrase, uid, gid,
-                                changeEchoId, changeEchoSeq, clientIp, deviceId);
+                                changeEchoId, changeEchoSeq, clientIp, deviceId,
+                                userspace, socksAddress, sharePorts);
 
             freeaddrinfo(res);
         }

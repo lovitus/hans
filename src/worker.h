@@ -27,12 +27,14 @@
 
 #include <string>
 #include <sys/types.h>
+#include <sys/select.h>
 
 class Worker
 {
 public:
     Worker(int tunnelMtu, const std::string *deviceName, bool answerEcho,
-           uid_t uid, gid_t gid);
+           uid_t uid, gid_t gid, bool createTun = true,
+           bool preferUnprivilegedEcho = false);
     virtual ~Worker() { }
 
     virtual void run();
@@ -84,6 +86,11 @@ protected:
     virtual void handleTunData(int dataLength, uint32_t sourceIp,
                                uint32_t destIp); // to echoSendPayloadBuffer
     virtual void handleTimeout();
+    virtual int addFileDescriptors(fd_set &readSet, fd_set &writeSet,
+                                   int maxFd);
+    virtual void handleFileDescriptors(fd_set &readSet, fd_set &writeSet);
+    virtual int idleIntervalMilliseconds() const;
+    virtual void handleIdle();
 
     void sendEcho(const TunnelHeader::Magic &magic, TunnelHeader::Type type,
                   int length, uint32_t realIp, bool reply, uint16_t id, uint16_t seq);

@@ -1,0 +1,124 @@
+#!/bin/sh
+# Privileged Linux end-to-end test for an unprivileged userspace client.
+
+set -eu
+
+BIN="${1:-./hans}"
+BINABS=$(readlink -f "$BIN")
+suffix=$(printf '%s' "$$" | tail -c 6)
+server_ns="hans-us-server-$suffix"
+client_ns="hans-us-client-$suffix"
+server_if="husa$suffix"
+client_if="husb$suffix"
+work="/tmp/hans-userspace-$suffix"
+server_log="$work/server.log"
+client_log="$work/client.log"
+
+cleanup() {
+    kill "${client_pid:-}" "${server_pid:-}" "${server_http_pid:-}" \
+         "${client_http_pid:-}" "${udp_pid:-}" 2>/dev/null || true
+    ip netns delete "$client_ns" 2>/dev/null || true
+    ip netns delete "$server_ns" 2>/dev/null || true
+}
+
+diagnostics() {
+    status=$?
+    if [ "$status" -ne 0 ]; then
+        echo "userspace server log:" >&2
+        cat "$server_log" >&2 2>/dev/null || true
+        echo "userspace client log:" >&2
+        cat "$client_log" >&2 2>/dev/null || true
+    fi
+    cleanup
+    exit "$status"
+}
+trap diagnostics EXIT INT TERM
+
+mkdir -p "$work/client-state" "$work/server-state"
+chmod 777 "$work/client-state"
+
+ip netns add "$server_ns"
+ip netns add "$client_ns"
+ip link add "$server_if" type veth peer name "$client_if"
+ip link set "$server_if" netns "$server_ns"
+ip link set "$client_if" netns "$client_ns"
+ip -n "$server_ns" link set lo up
+ip -n "$client_ns" link set lo up
+ip -n "$server_ns" addr add 192.0.2.1/24 dev "$server_if"
+ip -n "$client_ns" addr add 192.0.2.2/24 dev "$client_if"
+ip -n "$server_ns" link set "$server_if" up
+ip -n "$client_ns" link set "$client_if" up
+ip netns exec "$client_ns" sysctl -q -w net.ipv4.ping_group_range="0 2147483647"
+
+HANS_STATE_DIR="$work/server-state" ip netns exec "$server_ns" "$BINABS" \
+    -s 10.77.88.0 -p hans-userspace-ci -f -v >"$server_log" 2>&1 &
+server_pid=$!
+sleep 1
+
+ip netns exec "$server_ns" python3 -m http.server 18080 \
+    --bind 10.77.88.1 --directory "$(dirname "$BINABS")" >"$work/server-http.log" 2>&1 &
+server_http_pid=$!
+ip netns exec "$client_ns" python3 -m http.server 18081 \
+    --bind 127.0.0.1 --directory "$(dirname "$BINABS")" >"$work/client-http.log" 2>&1 &
+client_http_pid=$!
+ip netns exec "$server_ns" python3 -c \
+    'import socket;s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM);s.bind(("10.77.88.1",18083));exec("while True:\n d,a=s.recvfrom(65535)\n s.sendto(d,a)")' \
+    >"$work/server-udp.log" 2>&1 &
+udp_pid=$!
+
+ip netns exec "$client_ns" setpriv --reuid 65534 --regid 65534 --clear-groups \
+    env HANS_STATE_DIR="$work/client-state" "$BINABS" \
+    -c 192.0.2.1 -p hans-userspace-ci -f -v \
+    --feature userspace --socks5 127.0.0.1:18080 \
+    --shareports 18081,18082=127.0.0.1:18081 >"$client_log" 2>&1 &
+client_pid=$!
+
+connected=0
+attempt=40
+while [ "$attempt" -gt 0 ]; do
+    if grep -q "userspace network ready at 10.77.88.100" "$client_log"; then
+        connected=1
+        break
+    fi
+    kill -0 "$server_pid"
+    kill -0 "$client_pid"
+    sleep 0.25
+    attempt=$((attempt - 1))
+done
+[ "$connected" -eq 1 ]
+grep -q "using unprivileged ICMP ping socket" "$client_log"
+
+# Userspace mode must not create any kernel tunnel interface in the client.
+[ "$(ip -n "$client_ns" -o link show | wc -l)" -eq 2 ]
+
+ip netns exec "$client_ns" curl --fail --silent --show-error --max-time 20 \
+    --socks5-hostname 127.0.0.1:18080 \
+    http://10.77.88.1:18080/$(basename "$BINABS") -o "$work/socks-download"
+cmp "$BINABS" "$work/socks-download"
+
+ip netns exec "$server_ns" curl --fail --silent --show-error --max-time 20 \
+    http://10.77.88.100:18081/$(basename "$BINABS") -o "$work/share-download"
+cmp "$BINABS" "$work/share-download"
+ip netns exec "$server_ns" curl --fail --silent --show-error --max-time 20 \
+    http://10.77.88.100:18082/$(basename "$BINABS") -o "$work/share-explicit-download"
+cmp "$BINABS" "$work/share-explicit-download"
+
+ip netns exec "$client_ns" python3 "$(dirname "$BINABS")/test-socks5-udp.py" \
+    127.0.0.1 18080 10.77.88.1 18083
+
+# Exercise multiple simultaneous TCP PCBs and bridge buffers.
+for n in 1 2 3 4; do
+    ip netns exec "$client_ns" curl --fail --silent --show-error --max-time 20 \
+        --socks5 127.0.0.1:18080 \
+        http://10.77.88.1:18080/$(basename "$BINABS") -o "$work/concurrent-$n" &
+    eval "curl_pid_$n=$!"
+done
+for n in 1 2 3 4; do
+    eval "curl_pid=\$curl_pid_$n"
+    wait "$curl_pid"
+    cmp "$BINABS" "$work/concurrent-$n"
+done
+
+kill -0 "$server_pid"
+kill -0 "$client_pid"
+echo "OK: unprivileged SOCKS5 TCP/UDP and shared-port userspace tests passed"

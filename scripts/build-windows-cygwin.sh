@@ -54,9 +54,11 @@ fi
 PACKAGE_DIR="dist/windows-$LABEL"
 mkdir -p "$PACKAGE_DIR"
 cp hans.exe /bin/cygwin1.dll wintun.dll WINTUN-LICENSE.txt "$PACKAGE_DIR/"
+cp third_party/lwip/COPYING "$PACKAGE_DIR/LWIP-LICENSE.txt"
 
 echo "Packaged Windows $LABEL files:"
 ls -la "$PACKAGE_DIR/hans.exe" "$PACKAGE_DIR/cygwin1.dll" \
-    "$PACKAGE_DIR/wintun.dll" "$PACKAGE_DIR/WINTUN-LICENSE.txt"
+    "$PACKAGE_DIR/wintun.dll" "$PACKAGE_DIR/WINTUN-LICENSE.txt" \
+    "$PACKAGE_DIR/LWIP-LICENSE.txt"
 echo "PE imports:"
 objdump -p hans.exe | awk '/DLL Name:/ { print $3 }'

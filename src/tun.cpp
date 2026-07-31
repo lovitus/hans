@@ -54,9 +54,14 @@ static void winsystem(char *cmd)
 }
 #endif
 
-Tun::Tun(const string *device, int mtu)
+Tun::Tun(const string *device, int mtu, bool enabled)
 {
     this->mtu = mtu;
+    this->enabled = enabled;
+    this->fd = -1;
+
+    if (!enabled)
+        return;
 
     if (device)
         this->device = *device;
@@ -85,11 +90,14 @@ Tun::Tun(const string *device, int mtu)
 
 Tun::~Tun()
 {
-    tun_close(fd, &device[0]);
+    if (enabled)
+        tun_close(fd, &device[0]);
 }
 
 void Tun::setIp(uint32_t ip, uint32_t destIp)
 {
+    if (!enabled)
+        return;
     std::stringstream cmdline;
     string ips = Utility::formatIp(ip);
     string destIps = Utility::formatIp(destIp);
@@ -115,12 +123,16 @@ void Tun::setIp(uint32_t ip, uint32_t destIp)
 
 void Tun::write(const char *buffer, int length)
 {
+    if (!enabled)
+        return;
     if (tun_write(fd, (char *)buffer, length) == -1)
         syslog(LOG_ERR, "error writing %d bytes to tun: %s", length, tun_last_error());
 }
 
 int Tun::read(char *buffer)
 {
+    if (!enabled)
+        return -1;
     int length = tun_read(fd, buffer, mtu);
     if (length == -1)
         syslog(LOG_ERR, "error reading from tun: %s", tun_last_error());

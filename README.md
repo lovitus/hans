@@ -20,6 +20,7 @@ deployment, compatibility, and peer-management features:
 | Peer inspection | `hans --list-peers` shows device ID, tunnel IP, real IP, online/offline state, and last-seen time. `hans --show-device-id` displays the local persistent identity. |
 | Adaptive transport | Protocol v3 starts with conservative echo-request credits, measures reply RTT and server backlog, and adjusts the credit count instead of requiring a guessed `-w` window. |
 | Direct-reply upgrade and fallback | A client probes whether the path safely passes multiple replies for one echo request. A successful path upgrades to direct replies; sequence/ACK tracking and heartbeats automatically return it to adaptive credits if that path stops working, then probe it again after a quiet interval. |
+| Adapter-free userspace client | `--feature userspace` replaces TUN/TAP with a statically embedded lwIP stack. It exposes SOCKS5 TCP/UDP access and selected inbound ports while preserving the client's sticky VPN identity and tunnel IP. The normal kernel-interface path is unchanged unless this feature is explicitly selected. |
 | Backward-compatible protocol | New servers still accept v1/v2 clients. New clients try v3, then automatically fall back to v2 and the original protocol when connecting to an older server. |
 | Broad release matrix | GitHub Actions builds Linux, macOS, Windows/Cygwin (amd64 and legacy i386), FreeBSD, OpenBSD, and NetBSD binaries for the CPU architectures supported by the codebase. |
 | Static releases | Linux and BSD release binaries are fully static. Windows compiler/C++ runtimes are embedded in the executable; macOS uses only operating-system libraries. Release binaries are stripped before their isolated package tests to avoid shipping debug symbols. |
@@ -27,7 +28,7 @@ deployment, compatibility, and peer-management features:
 | Adapter fallback | Windows prefers an installed TAP-Windows adapter and automatically falls back to bundled Wintun. Linux prefers TUN and falls back to a veth pair plus `AF_PACKET` when TUN is unavailable. Auto-created interfaces use `hans1`, then `hans2`, and so on. |
 | Safe orphan cleanup | Auto-created Linux veth pairs carry a random ownership marker. On startup Hans removes a pair only when both endpoints and markers match exactly and no live process still owns it; ambiguous interfaces are always retained. |
 | Runtime packaging | Windows compiler and C++ runtimes are linked into `hans.exe`; the package includes the unavoidable `cygwin1.dll` and the signed official `wintun.dll`, allowing use without a separate Cygwin installation. |
-| Automated validation | Every build runs transport codec, sequence/ACK, and adaptive-window tests plus version/help and identity/lease checks. The stripped package is then tested from an isolated product directory. Privileged Linux CI also verifies automatic direct mode, bidirectional TCP throughput, forced reply-path failure, credit fallback, recovery, and re-upgrade. |
+| Automated validation | Every build runs transport codec, sequence/ACK, adaptive-window, and userspace configuration tests plus version/help and identity/lease checks. The stripped package is then tested from an isolated product directory. Privileged Linux CI also verifies automatic direct mode, bidirectional TCP throughput, forced reply-path failure, credit fallback, recovery, and re-upgrade. A separate test runs the stripped client as an unprivileged user without TUN, exercises SOCKS5 TCP/UDP and both port-mapping forms, and compares transferred binaries byte-for-byte. |
 | Continuous releases | Successful builds are collected and published automatically on the [Releases page](../../releases). |
 
 ## How it works
@@ -42,6 +43,11 @@ deployment, compatibility, and peer-management features:
 - New clients also send a persistent random device ID. The server uses it for
   sticky leases, so a peer normally receives the same tunnel IP after changing
   networks or reconnecting.
+- An explicitly selected userspace client does not create a kernel interface.
+  Its embedded lwIP stack owns the assigned tunnel IP: SOCKS5 connections are
+  emitted with that IP, and packets arriving at shared VPN ports are terminated
+  by lwIP and bridged to local host sockets. Server and peer protocol behavior
+  is identical to a normal client.
 - Protocol v3 does not use a fixed receive window by default. It begins with a
   small set of echo-request credits and grows or shrinks that set using measured
   RTT and queued work. It also probes for safe multi-reply delivery and uses
@@ -64,16 +70,22 @@ and NetBSD (amd64/aarch64/riscv64/powerpc64, several releases each) are
 published automatically on the [Releases page](../../releases). Windows users
 should download `hans-windows-amd64-cygwin.zip` on normal 64-bit systems, or
 the legacy `hans-windows-i386-cygwin.zip` when 32-bit support is required.
-Extract all four files—`hans.exe`, `cygwin1.dll`, `wintun.dll`, and
-`WINTUN-LICENSE.txt`—into the same directory; the DLLs must keep their exact
+Extract the executable and DLLs—`hans.exe`, `cygwin1.dll`, and `wintun.dll`—
+into the same directory; the DLLs must keep their exact
 filenames. Cygwin ended x86 maintenance at version 3.3.6, so amd64 is
-recommended whenever the operating system supports it.
+recommended whenever the operating system supports it. The archive also
+contains the Wintun and lwIP license notices.
 
-Run the Windows client from an elevated PowerShell or Command Prompt. Hans
+Run the normal Windows client from an elevated PowerShell or Command Prompt. Hans
 first uses an installed **TAP-Windows** adapter. If none can be opened, it
 loads the bundled, signed official Wintun runtime and creates `hans1` (or
 `hans2`, `hans3`, ... when earlier names are occupied). `-d "adapter name"`
 still requests an exact TAP/Wintun name.
+
+The adapter-free userspace client does not need TAP/Wintun or elevation on
+Windows. It sends ICMP through the operating system's asynchronous IP Helper
+API and uses only the packaged `hans.exe` and `cygwin1.dll`; `wintun.dll`
+remains in the standard archive for normal interface mode.
 
 Server hostnames are supported when DNS provides an IPv4 **A** record. The
 outer Hans transport currently uses IPv4 ICMP and does not yet implement
@@ -107,8 +119,10 @@ repository root. Run `make clean` to remove build artifacts.
 
 # Quick Start
 
-You need root privileges (or `CAP_NET_RAW`/`CAP_NET_ADMIN` on Linux) on both
-ends, because Hans opens a raw ICMP socket and creates a `tun` device.
+The normal interface mode needs root privileges (or `CAP_NET_RAW` and
+`CAP_NET_ADMIN` on Linux) on both ends because Hans opens a raw ICMP socket and
+creates a `tun` device. The server still needs those privileges in userspace
+client deployments; the client can often run without them as described below.
 
 ### 1. Start the server (Linux)
 
@@ -170,6 +184,83 @@ interface indexes point back to each other, their device types and `NOARP`
 flags match, and no process owns the marker socket. A custom `-d` interface,
 an interface created by an older Hans build, or any ambiguous/mismatched pair
 is deliberately left untouched for manual inspection.
+
+## Adapter-free userspace client
+
+Use this mode when the client cannot create TUN/TAP/Wintun, or when only
+selected applications and services should join the VPN. It is an additional
+client data path: without `--feature userspace`, Hans follows the existing
+kernel-interface path exactly as before.
+
+Start a loopback-only SOCKS5 listener:
+
+```sh
+./hans -c server.example.com -p secret -f -v \
+  --feature userspace \
+  --socks5 127.0.0.1:1080
+```
+
+The listener supports SOCKS5 `CONNECT` for TCP and `UDP ASSOCIATE` for UDP.
+IPv4 literals and domain-name targets are accepted; domain names are resolved
+by the client host. Connections enter the VPN through the client's assigned,
+sticky tunnel IP, so the destination peer sees the same VPN source address it
+would see from a normal TUN client.
+
+To expose local services to the VPN, list their ports:
+
+```sh
+./hans -c server.example.com -p secret -f -v \
+  --feature userspace \
+  --socks5 127.0.0.1:1080 \
+  --shareports 22,80,8080
+```
+
+Each plain port maps to the same port on loopback:
+
+```text
+VPN_IP:22   -> 127.0.0.1:22
+VPN_IP:80   -> 127.0.0.1:80
+VPN_IP:8080 -> 127.0.0.1:8080
+```
+
+Only write a full mapping when the listening port, target IP, or target port
+must differ:
+
+```sh
+--shareports 22,2222=127.0.0.1:22,8080=192.168.1.20:80
+```
+
+The last form deliberately lets VPN peers reach another host visible from the
+client. Treat it like opening a firewall rule. Only the listed VPN ports are
+accepted; Hans never exposes all 1–65535 ports implicitly. Services reached
+through a shared port see the connection coming from a local host socket, not
+the original peer address.
+
+The SOCKS listener has no authentication. It defaults by convention to
+`127.0.0.1`; binding it to a non-loopback address produces a warning and should
+only be done behind an appropriate host firewall. Hans authenticates the peer
+handshake but does not encrypt tunnel payloads, so use SSH/TLS or another
+encrypted protocol for sensitive traffic.
+
+The embedded lwIP 2.2.1 source is compiled and linked into every release. It
+adds no DLL, shared-library, service, Go runtime, or Rust runtime dependency,
+and allocates its packet pools only when userspace mode is selected.
+
+Privilege behavior depends on the host ICMP API:
+
+- Windows uses the asynchronous IP Helper API and does not need an adapter or
+  administrator token in userspace mode.
+- macOS uses its unprivileged ICMP ping socket.
+- Linux uses `SOCK_DGRAM/IPPROTO_ICMP`. The process group must be allowed by
+  `net.ipv4.ping_group_range`; distributions that disable ping sockets require
+  an administrator to enable an appropriate group range once.
+- FreeBSD, OpenBSD, and NetBSD use a ping socket when the OS permits it and
+  otherwise fall back to the existing raw socket, which may require privilege.
+
+Running the system `ping` command successfully is not by itself proof that an
+arbitrary process has ICMP permission: some systems grant a capability or
+set-user-ID privilege only to that executable. Hans reports a specific ICMP
+permission error when neither a ping socket nor a raw socket is available.
 
 ---
 
@@ -309,7 +400,8 @@ sudo systemctl enable --now hans-server
 RUN AS CLIENT
   hans -c server [-fv] [-p passphrase] [-u user] [-d tun_device]
        [-m reference_mtu] [-w auto|polls] [--device-id id]
-       [--device-id-file path]
+       [--device-id-file path] [--feature userspace]
+       [--socks5 IPv4:port] [--shareports mappings]
 
 RUN AS SERVER (linux only)
   hans -s network [-fvr] [-p passphrase] [-u user] [-d tun_device]
@@ -338,6 +430,13 @@ ARGUMENTS
   -w auto|polls Adaptive credits/direct probing by default; a number forces a fixed window.
   -i            Change echo id on every echo request (client only).
   -q            Change echo sequence number on every echo request (client only).
+  --feature userspace
+                Run the client without TUN/TAP using the embedded TCP/IP stack.
+  --socks5 ip:port
+                Listen for SOCKS5 TCP CONNECT and UDP ASSOCIATE requests.
+  --shareports mappings
+                Share VPN ports; plain N maps to 127.0.0.1:N, while
+                listen=target-ip:target-port specifies an explicit target.
   -f            Run in foreground.
   -v            Print debug information.
 ```

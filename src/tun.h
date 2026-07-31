@@ -28,7 +28,7 @@
 class Tun
 {
 public:
-    Tun(const std::string *device, int mtu);
+    Tun(const std::string *device, int mtu, bool enabled = true);
     ~Tun();
 
     int getFd() { return fd; }
@@ -44,6 +44,7 @@ protected:
 
     int mtu;
     int fd;
+    bool enabled;
 };
 
 #endif

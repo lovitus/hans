@@ -57,8 +57,11 @@ namespace
 Client::Client(int tunnelMtu, const string *deviceName, uint32_t serverIp,
                int maxPolls, const string &passphrase, uid_t uid, gid_t gid,
                bool changeEchoId, bool changeEchoSeq, uint32_t desiredIp,
-               const string &deviceId)
-    : Worker(tunnelMtu, deviceName, false, uid, gid), auth(passphrase)
+               const string &deviceId, bool userspace,
+               const string &socksAddress,
+               const vector<SharePort> &sharePorts)
+    : Worker(tunnelMtu, deviceName, false, uid, gid, !userspace, userspace),
+      auth(passphrase)
 {
     this->serverIp = serverIp;
     this->clientIp = INADDR_NONE;
@@ -79,13 +82,15 @@ Client::Client(int tunnelMtu, const string *deviceName, uint32_t serverIp,
     this->peerTransportMode = TransportV3::MODE_CREDIT;
     this->directProbePending = false;
     this->directProbeReplies = 0;
+    this->userspaceNetwork = userspace ?
+        new UserspaceNetwork(this, tunnelMtu, socksAddress, sharePorts) : NULL;
 
     state = STATE_CLOSED;
 }
 
 Client::~Client()
 {
-
+    delete userspaceNetwork;
 }
 
 void Client::sendConnectionRequest()
@@ -247,7 +252,10 @@ bool Client::handleEchoData(const TunnelHeader &header, int dataLength,
 
                     clientIp = ip;
                     desiredIp = ip;
-                    tun.setIp(ip, (ip & 0xffffff00) + 1);
+                    if (userspaceNetwork != NULL)
+                        userspaceNetwork->configure(ip, (ip & 0xffffff00) + 1);
+                    else
+                        tun.setIp(ip, (ip & 0xffffff00) + 1);
                 }
                 state = STATE_ESTABLISHED;
                 lastServerPacket = now;
@@ -579,9 +587,13 @@ void Client::handleDataFromServer(int dataLength)
         return;
     }
 
-    if (protocolVersion == 3)
-        tun.write(echoReceivePayloadBuffer() + TransportV3::HEADER_SIZE,
-                  dataLength);
+    const char *packet = protocolVersion == 3 ?
+        echoReceivePayloadBuffer() + TransportV3::HEADER_SIZE :
+        echoReceivePayloadBuffer();
+    if (userspaceNetwork != NULL)
+        userspaceNetwork->ingest(packet, dataLength);
+    else if (protocolVersion == 3)
+        tun.write(packet, dataLength);
     else
         sendToTun(dataLength);
 
@@ -651,4 +663,39 @@ void Client::run()
     sendConnectionRequest();
 
     Worker::run();
+}
+
+int Client::addFileDescriptors(fd_set &readSet, fd_set &writeSet, int maxFd)
+{
+    if (userspaceNetwork == NULL)
+        return maxFd;
+    return userspaceNetwork->addFileDescriptors(readSet, writeSet, maxFd);
+}
+
+void Client::handleFileDescriptors(fd_set &readSet, fd_set &writeSet)
+{
+    if (userspaceNetwork != NULL)
+        userspaceNetwork->handleFileDescriptors(readSet, writeSet);
+}
+
+int Client::idleIntervalMilliseconds() const
+{
+    return userspaceNetwork == NULL ? -1 : 50;
+}
+
+void Client::handleIdle()
+{
+    if (userspaceNetwork != NULL)
+        userspaceNetwork->tick();
+}
+
+void Client::sendUserspacePacket(const char *packet, int length)
+{
+    if (length <= 0 || length > tunnelMtu)
+    {
+        syslog(LOG_WARNING, "userspace packet dropped: invalid length %d", length);
+        return;
+    }
+    memcpy(echoSendPayloadBuffer(), packet, length);
+    handleTunData(length, 0, 0);
 }

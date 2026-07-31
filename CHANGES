@@ -1,3 +1,11 @@
+Release 1.4 (July 2026)
+-----------------------
+* Add an optional adapter-free userspace client using statically embedded lwIP
+* Add SOCKS5 TCP CONNECT and UDP ASSOCIATE access to every VPN peer
+* Add inbound VPN port sharing with loopback-by-default and explicit target maps
+* Add unprivileged ping-socket support on POSIX systems and Windows IP Helper transport
+* Add isolated-package userspace integration tests without TUN or build dependencies
+
 Release 1.3 (July 2026)
 -----------------------
 * Add protocol v3 with session-scoped sequence numbers and rolling ACKs

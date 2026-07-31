@@ -1,0 +1,10 @@
+lwIP is vendored from the upstream STABLE-2_2_1_RELEASE tag at commit
+77dcd25a72509eb83f72b033d219b1d40cd8eb95.
+
+Upstream: https://git.savannah.nongnu.org/git/lwip.git
+License:  BSD-style license in COPYING
+
+Hans vendors only the core IPv4, ICMP, TCP, UDP, pbuf, netif, memory, and timer
+sources listed in the top-level Makefile, plus their upstream headers. Those
+files are retained verbatim so the pinned code remains auditable. Hans-specific
+NO_SYS configuration and compiler adaptation live in port/.

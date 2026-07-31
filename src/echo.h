@@ -27,7 +27,7 @@
 class Echo
 {
 public:
-    Echo(int maxPayloadSize);
+    Echo(int maxPayloadSize, bool preferUnprivileged = false);
     ~Echo();
 
     int getFd() { return fd; }
@@ -53,6 +53,11 @@ protected:
 
     int fd;
     int bufferSize;
+    bool datagramSocket;
+#ifdef WIN32
+    class WindowsBackend;
+    WindowsBackend *windowsBackend;
+#endif
     std::vector<char> sendBuffer;
     std::vector<char> receiveBuffer;
 };

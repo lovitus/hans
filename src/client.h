@@ -23,18 +23,21 @@
 #include "worker.h"
 #include "auth.h"
 #include "transport.h"
+#include "userspace.h"
 
 #include <map>
 #include <vector>
 
-class Client : public Worker
+class Client : public Worker, public UserspaceNetworkObserver
 {
 
 public:
     Client(int tunnelMtu, const std::string *deviceName, uint32_t serverIp,
            int maxPolls, const std::string &passphrase, uid_t uid, gid_t gid,
            bool changeEchoId, bool changeEchoSeq, uint32_t desiredIp,
-           const std::string &deviceId);
+           const std::string &deviceId, bool userspace = false,
+           const std::string &socksAddress = std::string(),
+           const std::vector<SharePort> &sharePorts = std::vector<SharePort>());
     virtual ~Client();
 
     virtual void run();
@@ -54,6 +57,12 @@ protected:
     virtual bool handleEchoData(const TunnelHeader &header, int dataLength, uint32_t realIp, bool reply, uint16_t id, uint16_t seq);
     virtual void handleTunData(int dataLength, uint32_t sourceIp, uint32_t destIp);
     virtual void handleTimeout();
+    virtual int addFileDescriptors(fd_set &readSet, fd_set &writeSet,
+                                   int maxFd);
+    virtual void handleFileDescriptors(fd_set &readSet, fd_set &writeSet);
+    virtual int idleIntervalMilliseconds() const;
+    virtual void handleIdle();
+    virtual void sendUserspacePacket(const char *packet, int length);
 
     void handleDataFromServer(int length);
 
@@ -109,6 +118,7 @@ protected:
     uint16_t nextEchoSequence;
 
     State state;
+    UserspaceNetwork *userspaceNetwork;
 };
 
 #endif
