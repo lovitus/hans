@@ -238,17 +238,32 @@ jobs:
       - name: Bundle Cygwin runtime DLLs
         shell: C:\tools\cygwin\bin\bash.exe --login -eo pipefail -o igncr '{0}'
         run: |
-          # Collect every Cygwin DLL imported by hans.exe. A C++ build needs
-          # cygwin1.dll plus the Cygwin libgcc and libstdc++ runtimes; bundling
-          # only cygwin1.dll fails before main() with STATUS_DLL_NOT_FOUND.
+          # Collect the complete transitive closure of Cygwin DLL imports.
+          # hans.exe directly needs cygwin, libgcc, and libstdc++; those DLLs
+          # may import additional Cygwin DLLs of their own.
           cd "$(cygpath -u '${{ github.workspace }}')"
-          objdump -p hans.exe |
-            awk '/DLL Name: cyg/ { print $3 }' |
-            while IFS= read -r dll; do
-              source="$(cygpath -u "C:\\tools\\cygwin\\bin\\$dll")"
-              test -f "$source"
-              cp "$source" .
-            done
+          touch .cyg-dlls-seen
+          echo hans.exe > .cyg-dlls-pending
+          while [ -s .cyg-dlls-pending ]; do
+            binary="$(head -n 1 .cyg-dlls-pending)"
+            tail -n +2 .cyg-dlls-pending > .cyg-dlls-next
+            mv .cyg-dlls-next .cyg-dlls-pending
+
+            objdump -p "$binary" |
+              awk '/DLL Name: cyg/ { print $3 }' |
+              while IFS= read -r dll; do
+                if grep -Fxq "$dll" .cyg-dlls-seen; then
+                  continue
+                fi
+                source="$(cygpath -u "C:\\tools\\cygwin\\bin\\$dll")"
+                test -f "$source"
+                cp "$source" .
+                echo "$dll" >> .cyg-dlls-seen
+                echo "$dll" >> .cyg-dlls-pending
+              done
+          done
+          unlink .cyg-dlls-seen
+          unlink .cyg-dlls-pending
           ls -la cyg*.dll
       - name: Test packaged executable from PowerShell
         shell: pwsh
@@ -258,8 +273,10 @@ jobs:
           # the files bundled next to hans.exe.
           $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
           $output = (& .\hans.exe 2>&1 | Out-String)
+          $exitCode = $LASTEXITCODE
           if ($output -notmatch 'IP over ICMP version') {
-            throw "Packaged hans.exe did not start from PowerShell. Output: $output"
+            $files = (Get-ChildItem .\hans.exe, .\cyg*.dll | Select-Object -ExpandProperty Name) -join ', '
+            throw "Packaged hans.exe did not start from PowerShell (exit $exitCode; files: $files). Output: $output"
           }
           # No arguments intentionally prints usage and exits non-zero.
           exit 0
