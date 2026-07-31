@@ -235,15 +235,21 @@ jobs:
           BIN=hans
           [ -f hans.exe ] && BIN=hans.exe
           ./scripts/test-hans.sh "./$BIN" "windows-amd64-cygwin"
-      - name: Bundle cygwin1.dll runtime
+      - name: Bundle Cygwin runtime DLLs
         shell: C:\tools\cygwin\bin\bash.exe --login -eo pipefail -o igncr '{0}'
         run: |
-          # hans.exe is dynamically linked against cygwin1.dll. Without it
-          # sitting next to the executable (or on PATH), it will not run on
-          # a plain Windows machine that doesn't already have Cygwin
-          # installed, so it must be shipped alongside the binary.
+          # Collect every Cygwin DLL imported by hans.exe. A C++ build needs
+          # cygwin1.dll plus the Cygwin libgcc and libstdc++ runtimes; bundling
+          # only cygwin1.dll fails before main() with STATUS_DLL_NOT_FOUND.
           cd "$(cygpath -u '${{ github.workspace }}')"
-          cp "$(cygpath -u 'C:\tools\cygwin\bin\cygwin1.dll')" .
+          objdump -p hans.exe |
+            awk '/DLL Name: cyg/ { print $3 }' |
+            while IFS= read -r dll; do
+              source="$(cygpath -u "C:\\tools\\cygwin\\bin\\$dll")"
+              test -f "$source"
+              cp "$source" .
+            done
+          ls -la cyg*.dll
       - name: Test packaged executable from PowerShell
         shell: pwsh
         run: |
@@ -258,7 +264,7 @@ jobs:
           name: hans-windows-amd64-cygwin
           path: |
             hans.exe
-            cygwin1.dll
+            cyg*.dll
 
   # ---------------------------------------------------------------------
   # FreeBSD: amd64, aarch64, riscv64, powerpc64 across kernel releases.
@@ -431,7 +437,7 @@ jobs:
               # because the loader looks specifically for "cygwin1.dll".
               (
                 cd "$d"
-                zip -q "$GITHUB_WORKSPACE/release/$name.zip" hans.exe cygwin1.dll
+                zip -q "$GITHUB_WORKSPACE/release/$name.zip" hans.exe cyg*.dll
               )
               continue
             fi
