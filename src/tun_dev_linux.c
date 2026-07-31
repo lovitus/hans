@@ -23,6 +23,8 @@
 #include <net/if.h>
 #include <netpacket/packet.h>
 #include <net/ethernet.h>
+#include <linux/ethtool.h>
+#include <linux/sockios.h>
 
 #ifdef HAVE_LINUX_IF_TUN_H
 #include <linux/if_tun.h>
@@ -281,6 +283,95 @@ static int get_interface_mac(const char *name, unsigned char *mac)
     return 0;
 }
 
+struct offload_setting
+{
+    uint32_t set_command;
+    uint32_t get_command;
+};
+
+static int set_ethtool_value(int fd, const char *name, uint32_t command,
+                             uint32_t value)
+{
+    struct ethtool_value setting;
+    struct ifreq ifr;
+
+    memset(&setting, 0, sizeof(setting));
+    setting.cmd = command;
+    setting.data = value;
+    memset(&ifr, 0, sizeof(ifr));
+    strncpy(ifr.ifr_name, name, IFNAMSIZ - 1);
+    ifr.ifr_data = (char *)&setting;
+    return ioctl(fd, SIOCETHTOOL, &ifr);
+}
+
+static int get_ethtool_value(int fd, const char *name, uint32_t command,
+                             uint32_t *value)
+{
+    struct ethtool_value setting;
+    struct ifreq ifr;
+
+    memset(&setting, 0, sizeof(setting));
+    setting.cmd = command;
+    memset(&ifr, 0, sizeof(ifr));
+    strncpy(ifr.ifr_name, name, IFNAMSIZ - 1);
+    ifr.ifr_data = (char *)&setting;
+    if (ioctl(fd, SIOCETHTOOL, &ifr) < 0)
+        return -1;
+    *value = setting.data;
+    return 0;
+}
+
+static int disable_veth_offloads(const char *name)
+{
+    static const struct offload_setting settings[] = {
+        { ETHTOOL_STSO, ETHTOOL_GTSO },
+#ifdef ETHTOOL_SUFO
+        { ETHTOOL_SUFO, ETHTOOL_GUFO },
+#endif
+        { ETHTOOL_SGSO, ETHTOOL_GGSO },
+        { ETHTOOL_SSG, ETHTOOL_GSG },
+        { ETHTOOL_STXCSUM, ETHTOOL_GTXCSUM }
+    };
+    int fd, saved_errno;
+    unsigned int index;
+    uint32_t value;
+
+    fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0)
+        return -1;
+
+    for (index = 0; index < sizeof(settings) / sizeof(settings[0]); index++)
+    {
+        if (set_ethtool_value(fd, name, settings[index].set_command, 0) < 0 &&
+            errno != EOPNOTSUPP && errno != EINVAL)
+            goto failed;
+    }
+
+    /* Unsupported legacy ethtool operations are acceptable only when the
+     * corresponding feature cannot be queried either. If the kernel reports
+     * that an offload remains enabled, AF_PACKET would receive incomplete
+     * checksums or oversized GSO frames, so fail instead of creating a tunnel
+     * that works for ping but silently drops TCP/UDP traffic. */
+    for (index = 0; index < sizeof(settings) / sizeof(settings[0]); index++)
+    {
+        if (get_ethtool_value(fd, name, settings[index].get_command, &value) == 0 &&
+            value != 0)
+        {
+            errno = EOPNOTSUPP;
+            goto failed;
+        }
+    }
+
+    close(fd);
+    return 0;
+
+failed:
+    saved_errno = errno;
+    close(fd);
+    errno = saved_errno;
+    return -1;
+}
+
 static int open_veth(char *dev)
 {
     struct sockaddr_ll address;
@@ -314,7 +405,9 @@ static int open_veth(char *dev)
     if (run_ip("link", "add", public_name, "type", "veth", "peer", "name",
                private_name) < 0)
         goto failed_without_interface;
-    if (run_ip("link", "set", "dev", public_name, "up", NULL, NULL, NULL) < 0 ||
+    if (disable_veth_offloads(public_name) < 0 ||
+        disable_veth_offloads(private_name) < 0 ||
+        run_ip("link", "set", "dev", public_name, "up", NULL, NULL, NULL) < 0 ||
         run_ip("link", "set", "dev", public_name, "arp", "off", NULL, NULL) < 0 ||
         run_ip("link", "set", "dev", private_name, "up", NULL, NULL, NULL) < 0 ||
         (automatically_named &&

@@ -145,6 +145,11 @@ from iproute2; it cannot bypass missing privileges. The public interface is
 named `hans1`, then `hans2`, and so on. The private peer is removed with it
 when Hans exits.
 
+The veth backend disables TX checksum, scatter-gather, TSO/UFO, and GSO in
+the kernel. `AF_PACKET` otherwise sees checksum-partial or oversized offload
+frames: ping may appear healthy while TCP/UDP packets are discarded after
+crossing the tunnel.
+
 If Hans is killed with `SIGKILL`, normal teardown cannot run. New auto-created
 veth pairs therefore carry the same random 128-bit ownership marker on both
 ends while the owning process holds a Linux abstract socket for that marker.

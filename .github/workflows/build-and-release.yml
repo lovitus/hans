@@ -74,7 +74,7 @@ jobs:
             bash -c '
               set -e
               apt-get update -qq
-              apt-get install -y -qq iproute2
+              apt-get install -y -qq ethtool iproute2
               /product/hans -c 127.0.0.1 -p hans-veth-ci -f -v >/tmp/hans-1.out 2>&1 &
               pid1=$!
               for attempt in 1 2 3 4 5; do
@@ -83,6 +83,10 @@ jobs:
               done
               ip link show hans1 | grep -q NOARP
               grep -q "^hans.icmp-tunnel/veth/v1/[0-9a-f]\{32\}$" /sys/class/net/hans1/ifalias
+              ethtool -k hans1 | grep -q "^tx-checksumming: off"
+              ethtool -k hans1 | grep -q "^scatter-gather: off"
+              ethtool -k hans1 | grep -q "^tcp-segmentation-offload: off"
+              ethtool -k hans1 | grep -q "^generic-segmentation-offload: off"
 
               # An active marked pair must never be reclaimed; the second
               # process must choose the next available name.
