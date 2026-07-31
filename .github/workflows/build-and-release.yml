@@ -72,9 +72,9 @@ jobs:
             image: ubuntu:24.04
             label: arm64-qemu
             experimental: false
-          - platform: linux/arm/v6
-            image: arm32v6/debian:bookworm
-            label: armv6
+          - platform: linux/mips64le
+            image: ubuntu:24.04
+            label: mips64le
             experimental: true
           - platform: linux/ppc64le
             image: ubuntu:24.04
@@ -152,7 +152,7 @@ jobs:
         shell: C:\tools\cygwin\bin\bash.exe --login -eo pipefail -o igncr '{0}'
         run: |
           cd "$(cygpath -u '${{ github.workspace }}')"
-          make CPPFLAGS='-c -g -std=gnu++98 -Wall -Wextra -Wno-sign-compare -Wno-missing-field-initializers -DWIN32'
+          make CPPFLAGS='-c -g -std=gnu++98 -fpermissive -Wall -Wextra -Wno-sign-compare -Wno-missing-field-initializers -DWIN32'
           if [ -f hans.exe ]; then cp hans.exe hans; fi
       - name: Test (version, help, connection)
         shell: C:\tools\cygwin\bin\bash.exe --login -eo pipefail -o igncr '{0}'
