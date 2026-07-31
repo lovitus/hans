@@ -20,7 +20,7 @@ deployment, compatibility, and peer-management features:
 | Peer inspection | `hans --list-peers` shows device ID, tunnel IP, real IP, online/offline state, and last-seen time. `hans --show-device-id` displays the local persistent identity. |
 | Backward-compatible protocol | New servers still accept legacy clients. New clients try the device-identity protocol first and automatically fall back when connecting to an older server. |
 | Broad release matrix | GitHub Actions builds Linux, macOS, Windows/Cygwin (amd64 and legacy i386), FreeBSD, OpenBSD, and NetBSD binaries for the CPU architectures supported by the codebase. |
-| Static releases | Linux and BSD release binaries are fully static. Windows compiler/C++ runtimes are embedded in the executable; macOS uses only operating-system libraries. |
+| Static releases | Linux and BSD release binaries are fully static. Windows compiler/C++ runtimes are embedded in the executable; macOS uses only operating-system libraries. Release binaries are stripped before their isolated package tests to avoid shipping debug symbols. |
 | Old-Linux support | Statically linked musl binaries avoid glibc version dependencies and run on systems such as CentOS 7, older distributions, embedded Linux, and Alpine. |
 | Runtime packaging | Windows compiler and C++ runtimes are linked into `hans.exe`; only the unavoidable `cygwin1.dll` is bundled, allowing use without a separate Cygwin installation. |
 | Automated validation | Every build checks version/help output and persistent identity/lease commands, then repeats those checks from an isolated product directory without the compiler or development environment. Environments with root and TUN support additionally attempt a real client/server tunnel connection. |

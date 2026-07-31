@@ -25,6 +25,10 @@ BIN=hans
 [ -f hans.exe ] && BIN=hans.exe
 ./scripts/test-hans.sh "./$BIN" "windows-$LABEL-cygwin"
 
+# Keep symbols in the build-time test binary, then strip the exact executable
+# that will be copied into the release package and isolated-test it later.
+strip -s hans.exe
+
 # Fail if a compiler/runtime package becomes dynamically linked again.
 # Windows system DLLs are allowed; the sole Cygwin import must be cygwin1.dll.
 cyg_imports="$({

@@ -55,6 +55,7 @@ jobs:
           scripts/test-hans.sh ./hans "linux-${{ matrix.label }}"
       - name: Test packaged binary without build dependencies
         run: |
+          strip -s hans
           mkdir -p "dist/${{ matrix.label }}"
           cp hans "dist/${{ matrix.label }}/hans"
           docker run --rm \
@@ -126,6 +127,7 @@ jobs:
               fi
               chmod +x scripts/test-hans.sh
               scripts/test-hans.sh ./hans "linux-${{ matrix.label }}"
+              strip -s hans
               mkdir -p "dist/${{ matrix.label }}"
               cp hans "dist/${{ matrix.label }}/hans-linux-${{ matrix.label }}"
             '
@@ -200,6 +202,7 @@ jobs:
               fi
               chmod +x scripts/test-hans.sh
               sh scripts/test-hans.sh ./hans "linux-${{ matrix.label }}"
+              strip -s hans
               mkdir -p "dist/${{ matrix.label }}"
               cp hans "dist/${{ matrix.label }}/hans-linux-${{ matrix.label }}"
             '
@@ -240,6 +243,7 @@ jobs:
           scripts/test-hans.sh ./hans "macos-${{ matrix.label }}"
       - name: Test packaged binary with a minimal environment
         run: |
+          strip -S -x hans
           mkdir -p "dist/${{ matrix.label }}"
           cp hans "dist/${{ matrix.label }}/hans"
           unexpected="$({ otool -L "dist/${{ matrix.label }}/hans" | tail -n +2 || true; } |
@@ -415,6 +419,7 @@ jobs:
             make GCC=cc GPP=c++ LDFLAGS=-static
             chmod +x scripts/test-hans.sh
             sh scripts/test-hans.sh ./hans "freebsd-${{ matrix.release }}-${{ matrix.arch }}"
+            strip -s hans
             product="$GITHUB_WORKSPACE/dist/freebsd-${{ matrix.release }}-${{ matrix.arch }}"
             mkdir -p "$product"
             cp hans "$product/hans-freebsd-${{ matrix.release }}-${{ matrix.arch }}"
@@ -466,6 +471,7 @@ jobs:
             make GCC=cc GPP=c++ LDFLAGS=-static
             chmod +x scripts/test-hans.sh
             sh scripts/test-hans.sh ./hans "openbsd-${{ matrix.release }}-${{ matrix.arch }}"
+            strip -s hans
             product="$GITHUB_WORKSPACE/dist/openbsd-${{ matrix.release }}-${{ matrix.arch }}"
             mkdir -p "$product"
             cp hans "$product/hans-openbsd-${{ matrix.release }}-${{ matrix.arch }}"
@@ -525,6 +531,7 @@ jobs:
             make GCC=cc GPP=c++ LDFLAGS=-static
             chmod +x scripts/test-hans.sh
             sh scripts/test-hans.sh ./hans "netbsd-${{ matrix.release }}-${{ matrix.arch }}"
+            strip -s hans
             product="$GITHUB_WORKSPACE/dist/netbsd-${{ matrix.release }}-${{ matrix.arch }}"
             mkdir -p "$product"
             cp hans "$product/hans-netbsd-${{ matrix.release }}-${{ matrix.arch }}"
