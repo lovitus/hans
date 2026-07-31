@@ -170,13 +170,14 @@ jobs:
           [ -f hans.exe ] && BIN=hans.exe
           ./scripts/test-hans.sh "./$BIN" "windows-amd64-cygwin"
       - name: Bundle cygwin1.dll runtime
-        shell: bash
+        shell: C:\tools\cygwin\bin\bash.exe --login -eo pipefail -o igncr '{0}'
         run: |
           # hans.exe is dynamically linked against cygwin1.dll. Without it
           # sitting next to the executable (or on PATH), it will not run on
           # a plain Windows machine that doesn't already have Cygwin
           # installed, so it must be shipped alongside the binary.
-          cp /c/tools/cygwin/bin/cygwin1.dll .
+          cd "$(cygpath -u '${{ github.workspace }}')"
+          cp "$(cygpath -u 'C:\tools\cygwin\bin\cygwin1.dll')" .
       - uses: actions/upload-artifact@v4
         with:
           name: hans-windows-amd64-cygwin
