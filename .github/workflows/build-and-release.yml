@@ -901,7 +901,9 @@ jobs:
   # ---------------------------------------------------------------------
   release:
     name: Publish release
-    if: always() && github.event_name != 'pull_request'
+    # Do not replace the continuous release with a partial artifact set when
+    # any required build or isolated-package test failed.
+    if: github.event_name != 'pull_request'
     needs:
       - build-linux-native
       - build-linux-emulated
