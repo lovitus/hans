@@ -137,7 +137,14 @@ jobs:
           path: hans
 
   # ---------------------------------------------------------------------
-  # Windows via Cygwin (amd64).
+  # Windows via Cygwin (amd64 only).
+  #
+  # NOTE on arm64: Cygwin has never shipped an arm64/aarch64 port (it only
+  # builds for x86_64 and, historically, x86). There is therefore no Cygwin
+  # toolchain or cygwin1.dll runtime available for Windows-on-ARM, so a
+  # windows-11-arm job is not possible without porting hans away from Cygwin
+  # entirely (e.g. to MSYS2/MinGW-w64 and rewriting the POSIX-only calls
+  # such as syslog()/daemon()/getaddrinfo() it relies on). Out of scope here.
   # ---------------------------------------------------------------------
   build-windows:
     name: Windows amd64 (cygwin)
@@ -162,12 +169,21 @@ jobs:
           BIN=hans
           [ -f hans.exe ] && BIN=hans.exe
           ./scripts/test-hans.sh "./$BIN" "windows-amd64-cygwin"
+      - name: Bundle cygwin1.dll runtime
+        shell: bash
+        run: |
+          # hans.exe is dynamically linked against cygwin1.dll. Without it
+          # sitting next to the executable (or on PATH), it will not run on
+          # a plain Windows machine that doesn't already have Cygwin
+          # installed, so it must be shipped alongside the binary.
+          cp /c/tools/cygwin/bin/cygwin1.dll .
       - uses: actions/upload-artifact@v4
         with:
           name: hans-windows-amd64-cygwin
           path: |
             hans.exe
             hans
+            cygwin1.dll
 
   # ---------------------------------------------------------------------
   # FreeBSD: amd64, aarch64, riscv64, powerpc64 across kernel releases.
@@ -278,9 +294,9 @@ jobs:
           - release: "11.0"
             arch: aarch64
             experimental: true
-          - release: "11.0"
-            arch: riscv64
-            experimental: true
+          # riscv64 excluded: the vmactions NetBSD riscv64 VM never reaches a
+          # usable state on GitHub-hosted runners (boots but hangs before ssh
+          # is reachable), so the job cannot finish.
           - release: "10.1"
             arch: amd64
             experimental: false
