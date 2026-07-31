@@ -85,7 +85,8 @@ public:
         : library(NULL), icmpHandle(INVALID_HANDLE_VALUE), wakeEvent(NULL),
           stopping(false), threadStarted(false), createFileFunction(NULL),
           closeHandleFunction(NULL), sendEchoFunction(NULL),
-          parseRepliesFunction(NULL)
+          parseRepliesFunction(NULL),
+          replyBufferSize(sizeof(HansIcmpEchoReply32) + maxPayloadSize + 32)
     {
         pipeFds[0] = pipeFds[1] = -1;
         library = LoadLibraryA("iphlpapi.dll");
@@ -115,7 +116,6 @@ public:
         if (pthread_create(&thread, NULL, threadEntry, this) != 0)
             throw Exception("creating Windows ICMP worker", true);
         threadStarted = true;
-        (void)maxPayloadSize;
     }
 
     ~WindowsBackend()
@@ -154,7 +154,10 @@ public:
     {
         Request *request = new Request;
         request->payload.assign(payload, payload + length);
-        request->replyBuffer.resize(sizeof(HansIcmpEchoReply32) + length + 32);
+        // A short poll request can carry a full tunnel packet in its reply.
+        // ReplySize therefore has to follow the maximum receive payload, not
+        // the size of this particular request.
+        request->replyBuffer.resize(replyBufferSize);
         request->realIp = realIp;
         request->id = id;
         request->seq = seq;
@@ -328,6 +331,7 @@ private:
     CloseHandleFunction closeHandleFunction;
     SendEchoFunction sendEchoFunction;
     ParseRepliesFunction parseRepliesFunction;
+    size_t replyBufferSize;
     std::deque<Request *> queued;
     std::deque<Request *> active;
     std::deque<Request *> completed;
