@@ -806,6 +806,7 @@ public:
                 tcp_recv(connection->pcb, NULL);
                 tcp_sent(connection->pcb, NULL);
                 tcp_err(connection->pcb, NULL);
+                tcp_poll(connection->pcb, NULL, 0);
                 if (tcp_close(connection->pcb) != ERR_OK)
                     tcp_abort(connection->pcb);
                 connection->pcb = NULL;
@@ -822,6 +823,7 @@ public:
             tcp_recv(connection->pcb, NULL);
             tcp_sent(connection->pcb, NULL);
             tcp_err(connection->pcb, NULL);
+            tcp_poll(connection->pcb, NULL, 0);
             tcp_abort(connection->pcb);
             connection->pcb = NULL;
         }
