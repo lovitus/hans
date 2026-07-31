@@ -262,6 +262,35 @@ arbitrary process has ICMP permission: some systems grant a capability or
 set-user-ID privilege only to that executable. Hans reports a specific ICMP
 permission error when neither a ping socket nor a raw socket is available.
 
+When a Windows userspace client connects to a Linux server, the Windows IP
+Helper API completes an echo operation on the first matching reply. The
+server kernel's ordinary ping reply can otherwise win the race against the
+Hans reply. In the server's network namespace, suppress ordinary kernel echo
+replies while serving these clients:
+
+```sh
+sudo sysctl -w net.ipv4.icmp_echo_ignore_all=1
+```
+
+This disables normal ping replies from that Linux network namespace; restore
+the previous value when it is no longer needed. Hans deliberately does not
+change this host-wide setting automatically.
+
+Traffic between two tunnel clients is routed through the server's Hans
+interface. Linux servers therefore need IPv4 forwarding, and a restrictive
+`FORWARD` policy needs a narrow same-interface allow rule (replace the network
+and interface name as appropriate):
+
+```sh
+sudo sysctl -w net.ipv4.ip_forward=1
+sudo iptables -A FORWARD -i hans1 -o hans1 \
+  -s 10.0.0.0/24 -d 10.0.0.0/24 -j ACCEPT
+```
+
+This is required for normal peer-to-peer traffic as well as userspace SOCKS
+and shared-port traffic. It is not needed when only a client and the server's
+own tunnel address communicate.
+
 ---
 
 # Advanced Usage

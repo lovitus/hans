@@ -1,4 +1,5 @@
 #include "../src/transport.h"
+#include "../src/config.h"
 
 #include <assert.h>
 #include <string.h>
@@ -105,11 +106,18 @@ static void testAdaptiveCredit()
     assert(credit.target() == 3);
 }
 
+static void testWindowsCreditLifetime()
+{
+    assert(WINDOWS_ICMP_REQUEST_TIMEOUT_MS > CREDIT_REFRESH_MS);
+    assert(WINDOWS_ICMP_MAX_CREDITS * 2 <= WINDOWS_ICMP_MAX_PENDING);
+}
+
 int main()
 {
     testHeaderRoundTrip();
     testSequenceTracking();
     testAdaptiveCredit();
+    testWindowsCreditLifetime();
     std::cout << "OK: transport v3 codec, ACK window, and adaptive credit tests passed\n";
     return 0;
 }
