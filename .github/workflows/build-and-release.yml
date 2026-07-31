@@ -319,8 +319,7 @@ jobs:
               apt-get update -qq
               DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
                 curl iproute2 python3 util-linux
-              chmod +x /product/test-userspace.sh
-              /product/test-userspace.sh /product/hans
+              sh /product/test-userspace.sh /product/hans
             '
       - uses: actions/upload-artifact@v4
         with:

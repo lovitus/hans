@@ -1,2 +1,6 @@
 # Keep the pinned upstream lwIP source byte-for-byte auditable.
 third_party/lwip/** whitespace=-blank-at-eof,-space-before-tab,-trailing-space
+
+# Cygwin invokes these files directly after a Windows checkout.
+*.sh text eol=lf
+osflags text eol=lf

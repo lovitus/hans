@@ -1,3 +1,9 @@
+#ifdef __CYGWIN__
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 200112L
+#endif
+#endif
+
 #include "userspace.h"
 #include "exception.h"
 #include "time.h"
@@ -18,6 +24,7 @@ extern "C" {
 #include <errno.h>
 #include <fcntl.h>
 #include <netdb.h>
+#include <netinet/in.h>
 #include <set>
 #include <stdlib.h>
 #include <string.h>
@@ -567,11 +574,11 @@ public:
         }
         if (!host.empty())
         {
-            addrinfo hints;
+            struct addrinfo hints;
             memset(&hints, 0, sizeof(hints));
             hints.ai_family = AF_INET;
             hints.ai_socktype = SOCK_STREAM;
-            addrinfo *addresses = NULL;
+            struct addrinfo *addresses = NULL;
             if (getaddrinfo(host.c_str(), NULL, &hints, &addresses) != 0 ||
                 addresses == NULL)
             {
@@ -928,11 +935,11 @@ public:
             return false;
         if (!host.empty())
         {
-            addrinfo hints;
+            struct addrinfo hints;
             memset(&hints, 0, sizeof(hints));
             hints.ai_family = AF_INET;
             hints.ai_socktype = SOCK_DGRAM;
-            addrinfo *addresses = NULL;
+            struct addrinfo *addresses = NULL;
             if (getaddrinfo(host.c_str(), NULL, &hints, &addresses) != 0 ||
                 addresses == NULL)
             {

@@ -5,6 +5,7 @@ TUN_DEV_FILE = `sh osflags dev $(MODE)`
 GCC = gcc
 GPP = g++
 LWIP_CFLAGS = -Ithird_party/lwip/src/include -Ithird_party/lwip/port
+LWIP_HEADERS = third_party/lwip/port/lwipopts.h third_party/lwip/port/arch/cc.h
 LWIP_CORE_SOURCES = init def inet_chksum ip mem memp netif pbuf stats sys tcp tcp_in tcp_out timeouts udp
 LWIP_IPV4_SOURCES = icmp ip4 ip4_addr ip4_frag
 LWIP_OBJECTS = $(LWIP_CORE_SOURCES:%=build/lwip_%.o) $(LWIP_IPV4_SOURCES:%=build/lwip_ipv4_%.o)
@@ -75,11 +76,46 @@ build/time.o: src/time.cpp src/time.h
 build/userspace.o: src/userspace.cpp src/userspace.h src/exception.h src/utility.h src/time.h
 	$(GPP) -c src/userspace.cpp -o $@ $(CPPFLAGS) $(LWIP_CFLAGS)
 
-build/lwip_%.o: third_party/lwip/src/core/%.c third_party/lwip/port/lwipopts.h third_party/lwip/port/arch/cc.h
-	$(GCC) -c $< -o $@ $(CFLAGS) $(LWIP_CFLAGS)
+$(LWIP_OBJECTS): $(LWIP_HEADERS)
 
-build/lwip_ipv4_%.o: third_party/lwip/src/core/ipv4/%.c third_party/lwip/port/lwipopts.h third_party/lwip/port/arch/cc.h
-	$(GCC) -c $< -o $@ $(CFLAGS) $(LWIP_CFLAGS)
+build/lwip_init.o: third_party/lwip/src/core/init.c
+	$(GCC) -c third_party/lwip/src/core/init.c -o $@ $(CFLAGS) $(LWIP_CFLAGS)
+build/lwip_def.o: third_party/lwip/src/core/def.c
+	$(GCC) -c third_party/lwip/src/core/def.c -o $@ $(CFLAGS) $(LWIP_CFLAGS)
+build/lwip_inet_chksum.o: third_party/lwip/src/core/inet_chksum.c
+	$(GCC) -c third_party/lwip/src/core/inet_chksum.c -o $@ $(CFLAGS) $(LWIP_CFLAGS)
+build/lwip_ip.o: third_party/lwip/src/core/ip.c
+	$(GCC) -c third_party/lwip/src/core/ip.c -o $@ $(CFLAGS) $(LWIP_CFLAGS)
+build/lwip_mem.o: third_party/lwip/src/core/mem.c
+	$(GCC) -c third_party/lwip/src/core/mem.c -o $@ $(CFLAGS) $(LWIP_CFLAGS)
+build/lwip_memp.o: third_party/lwip/src/core/memp.c
+	$(GCC) -c third_party/lwip/src/core/memp.c -o $@ $(CFLAGS) $(LWIP_CFLAGS)
+build/lwip_netif.o: third_party/lwip/src/core/netif.c
+	$(GCC) -c third_party/lwip/src/core/netif.c -o $@ $(CFLAGS) $(LWIP_CFLAGS)
+build/lwip_pbuf.o: third_party/lwip/src/core/pbuf.c
+	$(GCC) -c third_party/lwip/src/core/pbuf.c -o $@ $(CFLAGS) $(LWIP_CFLAGS)
+build/lwip_stats.o: third_party/lwip/src/core/stats.c
+	$(GCC) -c third_party/lwip/src/core/stats.c -o $@ $(CFLAGS) $(LWIP_CFLAGS)
+build/lwip_sys.o: third_party/lwip/src/core/sys.c
+	$(GCC) -c third_party/lwip/src/core/sys.c -o $@ $(CFLAGS) $(LWIP_CFLAGS)
+build/lwip_tcp.o: third_party/lwip/src/core/tcp.c
+	$(GCC) -c third_party/lwip/src/core/tcp.c -o $@ $(CFLAGS) $(LWIP_CFLAGS)
+build/lwip_tcp_in.o: third_party/lwip/src/core/tcp_in.c
+	$(GCC) -c third_party/lwip/src/core/tcp_in.c -o $@ $(CFLAGS) $(LWIP_CFLAGS)
+build/lwip_tcp_out.o: third_party/lwip/src/core/tcp_out.c
+	$(GCC) -c third_party/lwip/src/core/tcp_out.c -o $@ $(CFLAGS) $(LWIP_CFLAGS)
+build/lwip_timeouts.o: third_party/lwip/src/core/timeouts.c
+	$(GCC) -c third_party/lwip/src/core/timeouts.c -o $@ $(CFLAGS) $(LWIP_CFLAGS)
+build/lwip_udp.o: third_party/lwip/src/core/udp.c
+	$(GCC) -c third_party/lwip/src/core/udp.c -o $@ $(CFLAGS) $(LWIP_CFLAGS)
+build/lwip_ipv4_icmp.o: third_party/lwip/src/core/ipv4/icmp.c
+	$(GCC) -c third_party/lwip/src/core/ipv4/icmp.c -o $@ $(CFLAGS) $(LWIP_CFLAGS)
+build/lwip_ipv4_ip4.o: third_party/lwip/src/core/ipv4/ip4.c
+	$(GCC) -c third_party/lwip/src/core/ipv4/ip4.c -o $@ $(CFLAGS) $(LWIP_CFLAGS)
+build/lwip_ipv4_ip4_addr.o: third_party/lwip/src/core/ipv4/ip4_addr.c
+	$(GCC) -c third_party/lwip/src/core/ipv4/ip4_addr.c -o $@ $(CFLAGS) $(LWIP_CFLAGS)
+build/lwip_ipv4_ip4_frag.o: third_party/lwip/src/core/ipv4/ip4_frag.c
+	$(GCC) -c third_party/lwip/src/core/ipv4/ip4_frag.c -o $@ $(CFLAGS) $(LWIP_CFLAGS)
 
 clean:
 	rm -rf build hans
