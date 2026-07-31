@@ -164,7 +164,7 @@ jobs:
             -v "${{ github.workspace }}:/work" -w /work \
             alpine:3.20 sh -c '
               set -e
-              apk add --no-cache build-base procps
+              apk add --no-cache build-base linux-headers procps
               make LDFLAGS=-static
               chmod +x scripts/test-hans.sh
               sh scripts/test-hans.sh ./hans "linux-${{ matrix.label }}"
