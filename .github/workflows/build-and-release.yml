@@ -110,6 +110,72 @@ jobs:
           path: hans-linux-${{ matrix.label }}
 
   # ---------------------------------------------------------------------
+  # Linux static musl builds (Alpine + `-static`).
+  #
+  # The glibc-linked binaries from build-linux-native/build-linux-emulated
+  # require GLIBC_2.34 (glibc 2.34, released 2021), because that's what the
+  # Ubuntu/Debian base images link against. They will refuse to run
+  # ("version GLIBC_2.34 not found") on older distros/kernels such as
+  # CentOS 7/8, RHEL 7/8, Debian 10, or Ubuntu 18.04/20.04, and on any
+  # embedded/router Linux that doesn't ship glibc at all.
+  #
+  # These musl builds are fully statically linked (musl supports static
+  # linking cleanly, unlike glibc's NSS-dependent dynamic linking), so they
+  # have *no* libc version dependency at all and run on essentially any
+  # Linux kernel new enough to support the syscalls hans uses - old
+  # distros, musl-based distros (Alpine, postmarketOS, ...), and minimal/
+  # embedded systems included.
+  # ---------------------------------------------------------------------
+  build-linux-musl:
+    name: Linux ${{ matrix.label }} (musl static)
+    runs-on: ubuntu-24.04
+    continue-on-error: ${{ matrix.experimental }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            label: amd64-musl
+            experimental: false
+          - platform: linux/arm64
+            label: arm64-musl
+            experimental: false
+          - platform: linux/386
+            label: i386-musl
+            experimental: false
+          - platform: linux/arm/v7
+            label: armv7-musl
+            experimental: false
+          - platform: linux/ppc64le
+            label: ppc64le-musl
+            experimental: true
+          - platform: linux/riscv64
+            label: riscv64-musl
+            experimental: true
+          - platform: linux/s390x
+            label: s390x-musl
+            experimental: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - name: Build & test in ${{ matrix.platform }} alpine (musl) container
+        run: |
+          docker run --rm --platform ${{ matrix.platform }} \
+            -v "${{ github.workspace }}:/work" -w /work \
+            alpine:3.20 sh -c '
+              set -e
+              apk add --no-cache build-base procps
+              make LDFLAGS=-static
+              chmod +x scripts/test-hans.sh
+              sh scripts/test-hans.sh ./hans "linux-${{ matrix.label }}"
+              cp hans "hans-linux-${{ matrix.label }}"
+            '
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hans-linux-${{ matrix.label }}
+          path: hans-linux-${{ matrix.label }}
+
+  # ---------------------------------------------------------------------
   # macOS: Intel (x86_64) and Apple Silicon (arm64).
   # ---------------------------------------------------------------------
   build-macos:
@@ -334,6 +400,7 @@ jobs:
     needs:
       - build-linux-native
       - build-linux-emulated
+      - build-linux-musl
       - build-macos
       - build-windows
       - build-freebsd

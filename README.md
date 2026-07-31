@@ -38,6 +38,18 @@ and NetBSD (amd64/aarch64/riscv64/powerpc64, several releases each) are
 published automatically on the [Releases page](../../releases). Windows users
 need `cygwin1.dll`, which is shipped alongside `hans.exe` in the same asset.
 
+**Linux: which binary should I use?**
+
+- `hans-linux-<arch>-ubuntuXX.XX` — dynamically linked against glibc.
+  Requires **glibc >= 2.34** (glibc 2.34, 2021) on the target machine. It
+  will fail with `version 'GLIBC_2.34' not found` on older distros/kernels
+  such as CentOS 7/8, RHEL 7/8, Debian 10, or Ubuntu 18.04/20.04.
+- `hans-linux-<arch>-musl` — **statically linked against musl libc**, with
+  no libc version dependency at all. Use this one if you're targeting an
+  old kernel/distro, a musl-based system (Alpine, postmarketOS, ...), an
+  embedded/router Linux, or you're simply unsure which glibc the target has.
+  This is the recommended choice for maximum compatibility.
+
 ## Building from source
 
 Requires `gcc`/`g++` (or `clang`'s `cc`/`c++`) and `make`:
