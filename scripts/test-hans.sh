@@ -64,6 +64,18 @@ if [ "$HELP_OK" -ne 0 ]; then
 fi
 echo "OK   [$LABEL]: help check passed"
 
+# DNS names with A records are supported, but the outer transport is IPv4
+# ICMP. Keep the IPv6-only diagnostic explicit instead of surfacing libc's
+# ambiguous "no usable address" message.
+IPV6_STATE="$(mktemp -d 2>/dev/null || echo /tmp/hans_ipv6_$$)"
+IPV6_OUT="$(HANS_STATE_DIR="$IPV6_STATE" "$BIN" -c ::1 -p hans-ipv6-check -f 2>&1)"
+rm -rf "$IPV6_STATE"
+if ! echo "$IPV6_OUT" | grep -q "resolves only to IPv6.*requires an IPv4 A record"; then
+    echo "FAIL [$LABEL]: IPv6-only server diagnostic was unclear: $IPV6_OUT"
+    exit 1
+fi
+echo "OK   [$LABEL]: IPv6-only server diagnostic passed"
+
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 if [ -x "$SCRIPT_DIR/test-identity-leases.sh" ]; then
     "$SCRIPT_DIR/test-identity-leases.sh" "$BIN"

@@ -75,16 +75,68 @@ jobs:
               set -e
               apt-get update -qq
               apt-get install -y -qq iproute2
-              /product/hans -c 127.0.0.1 -p hans-veth-ci -f -v >/tmp/hans.out 2>&1 &
-              pid=$!
+              /product/hans -c 127.0.0.1 -p hans-veth-ci -f -v >/tmp/hans-1.out 2>&1 &
+              pid1=$!
               for attempt in 1 2 3 4 5; do
                 ip link show hans1 >/dev/null 2>&1 && break
                 sleep 1
               done
               ip link show hans1 | grep -q NOARP
-              kill "$pid" 2>/dev/null || true
-              wait "$pid" 2>/dev/null || true
-              ! grep -q "could not create tunnel device" /tmp/hans.out
+              grep -q "^hans.icmp-tunnel/veth/v1/[0-9a-f]\{32\}$" /sys/class/net/hans1/ifalias
+
+              # An active marked pair must never be reclaimed; the second
+              # process must choose the next available name.
+              /product/hans -c 127.0.0.1 -p hans-veth-ci -f -v >/tmp/hans-2.out 2>&1 &
+              pid2=$!
+              for attempt in 1 2 3 4 5; do
+                ip link show hans2 >/dev/null 2>&1 && break
+                sleep 1
+              done
+              ip link show hans1 >/dev/null
+              ip link show hans2 | grep -q NOARP
+
+              # SIGKILL bypasses normal teardown and intentionally leaves
+              # hans1 behind. A later process may reclaim only that precisely
+              # marked, reciprocal, inactive pair.
+              kill -KILL "$pid1"
+              wait "$pid1" 2>/dev/null || true
+              ip link show hans1 >/dev/null
+              kill "$pid2"
+              wait "$pid2" 2>/dev/null || true
+              ! ip link show hans2 >/dev/null 2>&1
+
+              /product/hans -c 127.0.0.1 -p hans-veth-ci -f -v >/tmp/hans-3.out 2>&1 &
+              pid3=$!
+              for attempt in 1 2 3 4 5; do
+                grep -q "removing stale Hans veth pair hans1/hansp1" /tmp/hans-3.out &&
+                  ip link show hans1 >/dev/null 2>&1 && break
+                sleep 1
+              done
+              grep -q "removing stale Hans veth pair hans1/hansp1" /tmp/hans-3.out
+              ip link show hans1 | grep -q NOARP
+              kill "$pid3"
+              wait "$pid3" 2>/dev/null || true
+              ! ip link show hans1 >/dev/null 2>&1
+
+              # A name-compatible but unmarked pair is ambiguous and must be
+              # preserved. Hans leaves it alone and chooses hans2.
+              ip link add hans1 type veth peer name hansp1
+              ip link set dev hans1 arp off
+              /product/hans -c 127.0.0.1 -p hans-veth-ci -f -v >/tmp/hans-4.out 2>&1 &
+              pid4=$!
+              for attempt in 1 2 3 4 5; do
+                ip link show hans2 >/dev/null 2>&1 && break
+                sleep 1
+              done
+              ip link show hans1 >/dev/null
+              ip link show hans2 | grep -q NOARP
+              kill "$pid4"
+              wait "$pid4" 2>/dev/null || true
+              ip link show hans1 >/dev/null
+              ! ip link show hans2 >/dev/null 2>&1
+              ip link delete hans1
+              ! ip link show hansp1 >/dev/null 2>&1
+              ! grep -q "could not create tunnel device" /tmp/hans-1.out /tmp/hans-2.out /tmp/hans-3.out /tmp/hans-4.out
             '
       - uses: actions/upload-artifact@v4
         with:

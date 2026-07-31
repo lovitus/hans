@@ -12,11 +12,13 @@
 #include <string.h>
 #include <syslog.h>
 #include <errno.h>
-#include <signal.h>
+#include <ctype.h>
+#include <stddef.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <sys/un.h>
 #include <arpa/inet.h>
 #include <net/if.h>
 #include <netpacket/packet.h>
@@ -31,6 +33,11 @@ static char veth_public[IFNAMSIZ];
 static char veth_private[IFNAMSIZ];
 static int veth_private_index;
 static unsigned char veth_public_mac[ETH_ALEN];
+static int veth_owner_fd = -1;
+
+#define VETH_ALIAS_PREFIX "hans.icmp-tunnel/veth/v1/"
+#define VETH_TOKEN_BYTES 16
+#define VETH_TOKEN_HEX_LENGTH (VETH_TOKEN_BYTES * 2)
 
 static const char *find_ip_command(void)
 {
@@ -85,6 +92,161 @@ static int interface_exists(const char *name)
     return if_nametoindex(name) != 0;
 }
 
+static int read_text_file(const char *path, char *value, size_t value_length)
+{
+    int fd;
+    ssize_t length;
+
+    if (!value_length)
+        return -1;
+    fd = open(path, O_RDONLY);
+    if (fd < 0)
+        return -1;
+    length = read(fd, value, value_length - 1);
+    close(fd);
+    if (length < 0)
+        return -1;
+    value[length] = '\0';
+    while (length > 0 && (value[length - 1] == '\n' || value[length - 1] == '\r'))
+        value[--length] = '\0';
+    return 0;
+}
+
+static int read_interface_value(const char *name, const char *property,
+                                char *value, size_t value_length)
+{
+    char path[128];
+    snprintf(path, sizeof(path), "/sys/class/net/%s/%s", name, property);
+    return read_text_file(path, value, value_length);
+}
+
+static int valid_owner_alias(const char *alias, const char **token)
+{
+    size_t prefix_length = strlen(VETH_ALIAS_PREFIX);
+    int index;
+
+    if (strncmp(alias, VETH_ALIAS_PREFIX, prefix_length) != 0 ||
+        strlen(alias + prefix_length) != VETH_TOKEN_HEX_LENGTH)
+        return 0;
+    for (index = 0; index < VETH_TOKEN_HEX_LENGTH; index++)
+        if (!isxdigit((unsigned char)alias[prefix_length + index]))
+            return 0;
+    *token = alias + prefix_length;
+    return 1;
+}
+
+static int bind_owner_marker(const char *token)
+{
+    struct sockaddr_un address;
+    size_t address_length;
+    int fd = socket(AF_UNIX, SOCK_DGRAM, 0);
+
+    if (fd < 0)
+        return -1;
+    fcntl(fd, F_SETFD, FD_CLOEXEC);
+    memset(&address, 0, sizeof(address));
+    address.sun_family = AF_UNIX;
+    if (snprintf(address.sun_path + 1, sizeof(address.sun_path) - 1,
+                 "hans-veth-%s", token) >= (int)sizeof(address.sun_path) - 1)
+    {
+        close(fd);
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    address_length = offsetof(struct sockaddr_un, sun_path) +
+                     1 + strlen(address.sun_path + 1);
+    if (bind(fd, (struct sockaddr *)&address, address_length) < 0)
+    {
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+static int create_owner_alias(char *alias, size_t alias_length)
+{
+    unsigned char random_bytes[VETH_TOKEN_BYTES];
+    char token[VETH_TOKEN_HEX_LENGTH + 1];
+    int random_fd, index;
+    ssize_t length;
+
+    random_fd = open("/dev/urandom", O_RDONLY);
+    if (random_fd < 0)
+        return -1;
+    length = read(random_fd, random_bytes, sizeof(random_bytes));
+    close(random_fd);
+    if (length != (ssize_t)sizeof(random_bytes))
+    {
+        errno = EIO;
+        return -1;
+    }
+    for (index = 0; index < VETH_TOKEN_BYTES; index++)
+        snprintf(token + index * 2, 3, "%02x", random_bytes[index]);
+    snprintf(alias, alias_length, "%s%s", VETH_ALIAS_PREFIX, token);
+    return bind_owner_marker(token);
+}
+
+static int reciprocal_veth_pair(const char *public_name, const char *private_name)
+{
+    char public_ifindex[32], public_iflink[32];
+    char private_ifindex[32], private_iflink[32];
+    char public_flags[32], public_type[32], private_type[32];
+    unsigned long flags;
+
+    if (read_interface_value(public_name, "ifindex", public_ifindex,
+                             sizeof(public_ifindex)) < 0 ||
+        read_interface_value(public_name, "iflink", public_iflink,
+                             sizeof(public_iflink)) < 0 ||
+        read_interface_value(private_name, "ifindex", private_ifindex,
+                             sizeof(private_ifindex)) < 0 ||
+        read_interface_value(private_name, "iflink", private_iflink,
+                             sizeof(private_iflink)) < 0 ||
+        read_interface_value(public_name, "flags", public_flags,
+                             sizeof(public_flags)) < 0 ||
+        read_interface_value(public_name, "type", public_type,
+                             sizeof(public_type)) < 0 ||
+        read_interface_value(private_name, "type", private_type,
+                             sizeof(private_type)) < 0)
+        return 0;
+    flags = strtoul(public_flags, NULL, 0);
+    return strcmp(public_ifindex, private_iflink) == 0 &&
+           strcmp(private_ifindex, public_iflink) == 0 &&
+           strcmp(public_type, "1") == 0 && strcmp(private_type, "1") == 0 &&
+           (flags & IFF_NOARP) != 0;
+}
+
+static void cleanup_stale_veth_pairs(void)
+{
+    char public_name[IFNAMSIZ], private_name[IFNAMSIZ];
+    char public_alias[128], private_alias[128];
+    const char *token;
+    int index, owner_fd;
+
+    for (index = 1; index < 256; index++)
+    {
+        snprintf(public_name, sizeof(public_name), "hans%d", index);
+        snprintf(private_name, sizeof(private_name), "hansp%d", index);
+        if (!interface_exists(public_name) || !interface_exists(private_name) ||
+            read_interface_value(public_name, "ifalias", public_alias,
+                                 sizeof(public_alias)) < 0 ||
+            read_interface_value(private_name, "ifalias", private_alias,
+                                 sizeof(private_alias)) < 0 ||
+            strcmp(public_alias, private_alias) != 0 ||
+            !valid_owner_alias(public_alias, &token) ||
+            !reciprocal_veth_pair(public_name, private_name))
+            continue;
+
+        owner_fd = bind_owner_marker(token);
+        if (owner_fd < 0)
+            continue;
+
+        syslog(LOG_INFO, "removing stale Hans veth pair %s/%s", public_name,
+               private_name);
+        run_ip("link", "delete", public_name, NULL, NULL, NULL, NULL, NULL);
+        close(owner_fd);
+    }
+}
+
 static int choose_hans_names(char *public_name, char *private_name)
 {
     int index;
@@ -124,6 +286,8 @@ static int open_veth(char *dev)
     struct sockaddr_ll address;
     char public_name[IFNAMSIZ];
     char private_name[IFNAMSIZ];
+    char owner_alias[128];
+    int automatically_named = !dev[0];
     int fd;
 
     if (dev[0])
@@ -140,12 +304,22 @@ static int open_veth(char *dev)
     else if (choose_hans_names(public_name, private_name) < 0)
         return -1;
 
+    if (automatically_named)
+    {
+        veth_owner_fd = create_owner_alias(owner_alias, sizeof(owner_alias));
+        if (veth_owner_fd < 0)
+            return -1;
+    }
+
     if (run_ip("link", "add", public_name, "type", "veth", "peer", "name",
                private_name) < 0)
-        return -1;
+        goto failed_without_interface;
     if (run_ip("link", "set", "dev", public_name, "up", NULL, NULL, NULL) < 0 ||
         run_ip("link", "set", "dev", public_name, "arp", "off", NULL, NULL) < 0 ||
-        run_ip("link", "set", "dev", private_name, "up", NULL, NULL, NULL) < 0)
+        run_ip("link", "set", "dev", private_name, "up", NULL, NULL, NULL) < 0 ||
+        (automatically_named &&
+         (run_ip("link", "set", "dev", public_name, "alias", owner_alias, NULL, NULL) < 0 ||
+          run_ip("link", "set", "dev", private_name, "alias", owner_alias, NULL, NULL) < 0)))
         goto failed;
 
     veth_private_index = if_nametoindex(private_name);
@@ -178,6 +352,12 @@ failed:
         int saved_errno = errno;
         run_ip("link", "delete", public_name, NULL, NULL, NULL, NULL, NULL);
         errno = saved_errno;
+    }
+failed_without_interface:
+    if (veth_owner_fd >= 0)
+    {
+        close(veth_owner_fd);
+        veth_owner_fd = -1;
     }
     return -1;
 }
@@ -219,6 +399,9 @@ static int tun_open_common(char *dev, int istun)
 #ifdef HAVE_LINUX_IF_TUN_H
     struct ifreq ifr;
     char requested[IFNAMSIZ];
+
+    if (istun && !*dev)
+        cleanup_stale_veth_pairs();
 
     memset(requested, 0, sizeof(requested));
     if (*dev)
@@ -269,6 +452,11 @@ int tun_close(int fd, char *dev)
         veth_fd = -1;
         veth_public[0] = '\0';
         veth_private[0] = '\0';
+        if (veth_owner_fd >= 0)
+        {
+            close(veth_owner_fd);
+            veth_owner_fd = -1;
+        }
     }
     return result;
 }

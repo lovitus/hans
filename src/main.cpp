@@ -307,9 +307,11 @@ int main(int argc, char *argv[])
 
             struct addrinfo hints = {0};
             struct addrinfo *res = NULL;
+            struct addrinfo *address = NULL;
+            bool foundIpv6 = false;
 
-            hints.ai_family = AF_INET;
-            hints.ai_flags = AI_V4MAPPED | AI_ADDRCONFIG;
+            hints.ai_family = AF_UNSPEC;
+            hints.ai_flags = 0;
 
             int err = getaddrinfo(serverName.data(), NULL, &hints, &res);
             if (err)
@@ -318,7 +320,26 @@ int main(int argc, char *argv[])
                 return 1;
             }
 
-            sockaddr_in *sockaddr = reinterpret_cast<sockaddr_in *>(res->ai_addr);
+            for (struct addrinfo *candidate = res; candidate != NULL;
+                 candidate = candidate->ai_next)
+            {
+                if (candidate->ai_family == AF_INET && address == NULL)
+                    address = candidate;
+                else if (candidate->ai_family == AF_INET6)
+                    foundIpv6 = true;
+            }
+
+            if (address == NULL)
+            {
+                if (foundIpv6)
+                    syslog(LOG_ERR, "server name resolves only to IPv6; Hans currently requires an IPv4 A record for its ICMP transport");
+                else
+                    syslog(LOG_ERR, "server name has no usable IPv4 address");
+                freeaddrinfo(res);
+                return 1;
+            }
+
+            sockaddr_in *sockaddr = reinterpret_cast<sockaddr_in *>(address->ai_addr);
             uint32_t serverIp = sockaddr->sin_addr.s_addr;
 
             worker = new Client(mtu, device.empty() ? NULL : &device,

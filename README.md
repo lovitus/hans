@@ -23,6 +23,7 @@ deployment, compatibility, and peer-management features:
 | Static releases | Linux and BSD release binaries are fully static. Windows compiler/C++ runtimes are embedded in the executable; macOS uses only operating-system libraries. Release binaries are stripped before their isolated package tests to avoid shipping debug symbols. |
 | Old-Linux support | Statically linked musl binaries avoid glibc version dependencies and run on systems such as CentOS 7, older distributions, embedded Linux, and Alpine. |
 | Adapter fallback | Windows prefers an installed TAP-Windows adapter and automatically falls back to bundled Wintun. Linux prefers TUN and falls back to a veth pair plus `AF_PACKET` when TUN is unavailable. Auto-created interfaces use `hans1`, then `hans2`, and so on. |
+| Safe orphan cleanup | Auto-created Linux veth pairs carry a random ownership marker. On startup Hans removes a pair only when both endpoints and markers match exactly and no live process still owns it; ambiguous interfaces are always retained. |
 | Runtime packaging | Windows compiler and C++ runtimes are linked into `hans.exe`; the package includes the unavoidable `cygwin1.dll` and the signed official `wintun.dll`, allowing use without a separate Cygwin installation. |
 | Automated validation | Every build checks version/help output and persistent identity/lease commands, then repeats those checks from an isolated product directory without the compiler or development environment. Environments with root and TUN support additionally attempt a real client/server tunnel connection. |
 | Continuous releases | Successful builds are collected and published automatically on the [Releases page](../../releases). |
@@ -65,6 +66,11 @@ first uses an installed **TAP-Windows** adapter. If none can be opened, it
 loads the bundled, signed official Wintun runtime and creates `hans1` (or
 `hans2`, `hans3`, ... when earlier names are occupied). `-d "adapter name"`
 still requests an exact TAP/Wintun name.
+
+Server hostnames are supported when DNS provides an IPv4 **A** record. The
+outer Hans transport currently uses IPv4 ICMP and does not yet implement
+ICMPv6, so an AAAA-only hostname or an IPv6 literal cannot be used as the
+server address. Add an A record or use an IPv4-capable hostname/address.
 
 **Linux: which binary should I use?**
 
@@ -138,6 +144,16 @@ missing or unusable, it automatically creates a veth pair and uses an
 from iproute2; it cannot bypass missing privileges. The public interface is
 named `hans1`, then `hans2`, and so on. The private peer is removed with it
 when Hans exits.
+
+If Hans is killed with `SIGKILL`, normal teardown cannot run. New auto-created
+veth pairs therefore carry the same random 128-bit ownership marker on both
+ends while the owning process holds a Linux abstract socket for that marker.
+At the next startup Hans reclaims a pair only if the names are the expected
+`hansN`/`hanspN` pair, both aliases contain the same valid marker, their kernel
+interface indexes point back to each other, their device types and `NOARP`
+flags match, and no process owns the marker socket. A custom `-d` interface,
+an interface created by an older Hans build, or any ambiguous/mismatched pair
+is deliberately left untouched for manual inspection.
 
 ---
 
