@@ -61,24 +61,31 @@ jobs:
       matrix:
         include:
           - platform: linux/386
+            image: i386/debian:bookworm
             label: i386
             experimental: false
           - platform: linux/arm/v7
+            image: ubuntu:24.04
             label: armv7
             experimental: false
           - platform: linux/arm64
+            image: ubuntu:24.04
             label: arm64-qemu
             experimental: false
           - platform: linux/arm/v6
+            image: arm32v6/debian:bookworm
             label: armv6
             experimental: true
           - platform: linux/ppc64le
+            image: ubuntu:24.04
             label: ppc64le
             experimental: true
           - platform: linux/riscv64
+            image: ubuntu:24.04
             label: riscv64
             experimental: true
           - platform: linux/s390x
+            image: ubuntu:24.04
             label: s390x
             experimental: true
     steps:
@@ -88,7 +95,7 @@ jobs:
         run: |
           docker run --rm --platform ${{ matrix.platform }} \
             -v "${{ github.workspace }}:/work" -w /work \
-            ubuntu:24.04 bash -c '
+            ${{ matrix.image }} bash -c '
               set -e
               apt-get update -qq
               apt-get install -y -qq build-essential
@@ -145,7 +152,7 @@ jobs:
         shell: C:\tools\cygwin\bin\bash.exe --login -eo pipefail -o igncr '{0}'
         run: |
           cd "$(cygpath -u '${{ github.workspace }}')"
-          make
+          make CPPFLAGS='-c -g -std=gnu++98 -Wall -Wextra -Wno-sign-compare -Wno-missing-field-initializers -DWIN32'
           if [ -f hans.exe ]; then cp hans.exe hans; fi
       - name: Test (version, help, connection)
         shell: C:\tools\cygwin\bin\bash.exe --login -eo pipefail -o igncr '{0}'
@@ -196,7 +203,7 @@ jobs:
           release: ${{ matrix.release }}
           arch: ${{ matrix.arch }}
           usesh: true
-          sync: ${{ matrix.arch == 'riscv64' && 'scp' || 'rsync' }}
+          sync: ${{ (matrix.arch == 'riscv64' || matrix.arch == 'powerpc64') && 'scp' || 'rsync' }}
           prepare: |
             true
           run: |
