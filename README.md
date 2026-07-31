@@ -58,6 +58,12 @@ Extract `hans.exe` and `cygwin1.dll` into the same directory; the DLL must keep
 its exact filename. Cygwin ended x86 maintenance at version 3.3.6, so amd64 is
 recommended whenever the operating system supports it.
 
+The Windows client also requires an installed **TAP-Windows** adapter and an
+elevated PowerShell or Command Prompt. Hans opens the TAP device through its
+`.tap` driver interface; a Wintun-only installation is not sufficient. Use
+`-d "adapter name"` when more than one TAP adapter exists or when a specific
+adapter should be selected.
+
 **Linux: which binary should I use?**
 
 - `hans-linux-<arch>-ubuntuXX.XX` — fully static glibc build produced and

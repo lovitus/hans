@@ -205,7 +205,10 @@ int tun_open(char *dev)
     struct adapter_info *adapter_info;
     int socket_pair[2];
 
-    if (socketpair(AF_UNIX, SOCK_DGRAM, PF_UNIX, socket_pair))
+    /* The protocol argument must be zero for AF_UNIX. Older Cygwin releases
+     * tolerated PF_UNIX here, while current releases correctly reject it
+     * with EPROTONOSUPPORT before the TAP adapter is opened. */
+    if (socketpair(AF_UNIX, SOCK_DGRAM, 0, socket_pair))
     {
         error("creating socket pair: %s", strerror(errno));
         return -1;

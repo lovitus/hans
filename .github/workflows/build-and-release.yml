@@ -368,6 +368,26 @@ jobs:
           if ($peers -notmatch [regex]::Escape($id1) -or $peers -notmatch '10\.0\.0\.100' -or $peers -notmatch 'online') {
             throw "Packaged hans.exe failed peer-list test: $peers"
           }
+
+          # Exercise the actual Cygwin tunnel initialization in the stripped
+          # package. A runner normally has no TAP adapter, so reaching that
+          # error (or staying alive) is acceptable; socketpair must never fail
+          # with EPROTONOSUPPORT as it did when PF_UNIX was passed as protocol.
+          $probeOut = Join-Path $state 'tun-probe.out'
+          $probeErr = Join-Path $state 'tun-probe.err'
+          $probe = Start-Process -FilePath $exe `
+            -ArgumentList @('-c', '127.0.0.1', '-p', 'hans-ci-probe', '-f', '-v') `
+            -RedirectStandardOutput $probeOut `
+            -RedirectStandardError $probeErr `
+            -PassThru
+          if (-not $probe.WaitForExit(5000)) {
+            $probe.Kill($true)
+            $probe.WaitForExit()
+          }
+          $probeText = (Get-Content $probeOut, $probeErr -Raw -ErrorAction SilentlyContinue) -join "`n"
+          if ($probeText -match 'creating socket pair|Protocol not supported') {
+            throw "Packaged hans.exe failed Cygwin tunnel socket initialization: $probeText"
+          }
           # No arguments intentionally prints usage and exits non-zero.
           exit 0
       - uses: actions/upload-artifact@v4
