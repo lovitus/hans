@@ -53,7 +53,25 @@ ip netns exec "$client_ns" sysctl -q -w net.ipv4.ping_group_range="0 2147483647"
 HANS_STATE_DIR="$work/server-state" ip netns exec "$server_ns" "$BINABS" \
     -s 10.77.88.0 -p hans-userspace-ci -f -v >"$server_log" 2>&1 &
 server_pid=$!
-sleep 1
+
+# The stripped product is intentionally tested without net-tools.  Older Hans
+# releases used /sbin/ifconfig and log a non-fatal error when it is absent, so
+# the namespace fixture supplies the server address with the iproute2 tool it
+# already needs to construct the isolated network.
+server_ready=0
+attempt=40
+while [ "$attempt" -gt 0 ]; do
+    if ip -n "$server_ns" link show hans1 >/dev/null 2>&1; then
+        ip -n "$server_ns" addr replace 10.77.88.1/24 dev hans1
+        ip -n "$server_ns" link set hans1 up
+        server_ready=1
+        break
+    fi
+    kill -0 "$server_pid"
+    sleep 0.25
+    attempt=$((attempt - 1))
+done
+[ "$server_ready" -eq 1 ]
 
 ip netns exec "$server_ns" python3 -m http.server 18080 \
     --bind 10.77.88.1 --directory "$(dirname "$BINABS")" >"$work/server-http.log" 2>&1 &

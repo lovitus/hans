@@ -22,6 +22,8 @@
 
 #include <sys/socket.h>
 #include <sys/types.h>
+#include <arpa/inet.h>
+#include <unistd.h>
 
 #ifdef WIN32
 #include <w32api/windows.h>
@@ -301,8 +303,6 @@ private:
 #include <netinet/in_systm.h>
 #include <netinet/in.h>
 #include <netinet/ip.h>
-#include <arpa/inet.h>
-#include <unistd.h>
 #include <errno.h>
 #include <syslog.h>
 #include <stdio.h>
