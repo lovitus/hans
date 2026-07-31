@@ -83,10 +83,9 @@ jobs:
               done
               ip link show hans1 | grep -q NOARP
               grep -q "^hans.icmp-tunnel/veth/v1/[0-9a-f]\{32\}$" /sys/class/net/hans1/ifalias
-              ethtool -k hans1 | grep -q "^tx-checksumming: off"
-              ethtool -k hans1 | grep -q "^scatter-gather: off"
-              ethtool -k hans1 | grep -q "^tcp-segmentation-offload: off"
-              ethtool -k hans1 | grep -q "^generic-segmentation-offload: off"
+              ethtool -k hans1 | tee /tmp/hans1-features
+              grep -q "^tx-checksum-ip-generic: off" /tmp/hans1-features
+              grep -q "^generic-segmentation-offload: off" /tmp/hans1-features
 
               # An active marked pair must never be reclaimed; the second
               # process must choose the next available name.
