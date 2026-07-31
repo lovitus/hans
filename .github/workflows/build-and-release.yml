@@ -244,12 +244,20 @@ jobs:
           # installed, so it must be shipped alongside the binary.
           cd "$(cygpath -u '${{ github.workspace }}')"
           cp "$(cygpath -u 'C:\tools\cygwin\bin\cygwin1.dll')" .
+      - name: Test packaged executable from PowerShell
+        shell: pwsh
+        run: |
+          $output = (& .\hans.exe 2>&1 | Out-String)
+          if ($output -notmatch 'IP over ICMP version') {
+            throw "Packaged hans.exe did not start from PowerShell. Output: $output"
+          }
+          # No arguments intentionally prints usage and exits non-zero.
+          exit 0
       - uses: actions/upload-artifact@v4
         with:
           name: hans-windows-amd64-cygwin
           path: |
             hans.exe
-            hans
             cygwin1.dll
 
   # ---------------------------------------------------------------------
@@ -416,6 +424,17 @@ jobs:
           mkdir -p release
           for d in artifacts/*/; do
             name="$(basename "$d")"
+            if [ "$name" = "hans-windows-amd64-cygwin" ]; then
+              # Keep the executable and its runtime dependency under the exact
+              # filenames required by the Windows loader. Publishing them as
+              # separately prefixed release assets breaks Cygwin startup
+              # because the loader looks specifically for "cygwin1.dll".
+              (
+                cd "$d"
+                zip -q "$GITHUB_WORKSPACE/release/$name.zip" hans.exe cygwin1.dll
+              )
+              continue
+            fi
             for f in "$d"*; do
               [ -f "$f" ] || continue
               fname="$(basename "$f")"
@@ -430,15 +449,21 @@ jobs:
 
       - name: Determine release tag
         id: tag
+        env:
+          GIT_REF: ${{ github.ref }}
         run: |
-          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
-            echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
-            echo "prerelease=false" >> "$GITHUB_OUTPUT"
-            echo "name=hans ${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          if [[ "$GIT_REF" == refs/tags/* ]]; then
+            {
+              echo "tag=${GIT_REF#refs/tags/}"
+              echo "prerelease=false"
+              echo "name=hans ${GIT_REF#refs/tags/}"
+            } >> "$GITHUB_OUTPUT"
           else
-            echo "tag=latest" >> "$GITHUB_OUTPUT"
-            echo "prerelease=true" >> "$GITHUB_OUTPUT"
-            echo "name=Continuous build (${GITHUB_SHA::7})" >> "$GITHUB_OUTPUT"
+            {
+              echo "tag=latest"
+              echo "prerelease=true"
+              echo "name=Continuous build (${GITHUB_SHA::7})"
+            } >> "$GITHUB_OUTPUT"
           fi
 
       - name: Publish GitHub Release

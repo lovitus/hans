@@ -51,7 +51,9 @@ Prebuilt binaries for Linux (amd64/arm64/armv7/i386/ppc64le/riscv64/s390x/
 mips64le), macOS (amd64/arm64), Windows (amd64, via Cygwin), FreeBSD, OpenBSD
 and NetBSD (amd64/aarch64/riscv64/powerpc64, several releases each) are
 published automatically on the [Releases page](../../releases). Windows users
-need `cygwin1.dll`, which is shipped alongside `hans.exe` in the same asset.
+should download `hans-windows-amd64-cygwin.zip` and extract both `hans.exe` and
+`cygwin1.dll` into the same directory. The DLL must keep that exact filename;
+otherwise Windows cannot start the executable.
 
 **Linux: which binary should I use?**
 
