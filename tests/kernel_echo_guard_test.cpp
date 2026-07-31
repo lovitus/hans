@@ -3,7 +3,6 @@
 #include <assert.h>
 #include <fcntl.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <unistd.h>
 
 static int readValue(const char *path)
@@ -18,8 +17,10 @@ static int readValue(const char *path)
 
 int main()
 {
-    char path[] = "/tmp/hans-kernel-echo-test-XXXXXX";
-    int fd = mkstemp(path);
+    char path[128];
+    snprintf(path, sizeof(path), "/tmp/hans-kernel-echo-test-%ld",
+             (long)getpid());
+    int fd = open(path, O_RDWR | O_CREAT | O_EXCL, 0600);
     assert(fd != -1);
     assert(write(fd, "0\n", 2) == 2);
     close(fd);
