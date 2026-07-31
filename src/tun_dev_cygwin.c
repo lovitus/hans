@@ -20,6 +20,7 @@
  */
 
 #include "tun_dev.h"
+#include "wintun_compat.h"
 
 #include <unistd.h>
 #include <stdbool.h>
@@ -28,6 +29,9 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <stdio.h>
+#include <stdarg.h>
+#include <string.h>
+#include <wchar.h>
 
 #include <w32api/windows.h>
 #include <w32api/winioctl.h>
@@ -55,6 +59,20 @@ struct adapter_info
     int reader_read_fd, reader_write_fd;
     HANDLE reader_thread;
     HANDLE adapter_handle;
+    bool use_wintun;
+    HMODULE wintun_module;
+    WINTUN_ADAPTER_HANDLE wintun_adapter;
+    WINTUN_SESSION_HANDLE wintun_session;
+    WINTUN_CREATE_ADAPTER_FUNC *WintunCreateAdapter;
+    WINTUN_OPEN_ADAPTER_FUNC *WintunOpenAdapter;
+    WINTUN_CLOSE_ADAPTER_FUNC *WintunCloseAdapter;
+    WINTUN_START_SESSION_FUNC *WintunStartSession;
+    WINTUN_END_SESSION_FUNC *WintunEndSession;
+    WINTUN_GET_READ_WAIT_EVENT_FUNC *WintunGetReadWaitEvent;
+    WINTUN_RECEIVE_PACKET_FUNC *WintunReceivePacket;
+    WINTUN_RELEASE_RECEIVE_PACKET_FUNC *WintunReleaseReceivePacket;
+    WINTUN_ALLOCATE_SEND_PACKET_FUNC *WintunAllocateSendPacket;
+    WINTUN_SEND_PACKET_FUNC *WintunSendPacket;
 };
 
 #define ERROR_BUFFER_SIZE 1024
@@ -96,10 +114,139 @@ static struct adapter_info *get_adapter_info_from_fd(int fd)
     static struct adapter_info single_adapter_info = {
         .reader_read_fd = -1,
         .reader_write_fd = -1,
-        .reader_thread = INVALID_HANDLE_VALUE,
-        .adapter_handle = INVALID_HANDLE_VALUE
+        .reader_thread = NULL,
+        .adapter_handle = INVALID_HANDLE_VALUE,
+        .use_wintun = false,
+        .wintun_module = NULL,
+        .wintun_adapter = NULL,
+        .wintun_session = NULL
     };
     return &single_adapter_info;
+}
+
+static bool load_wintun_function(HMODULE module, FARPROC *target, const char *name)
+{
+    *target = GetProcAddress(module, name);
+    if (!*target)
+    {
+        error("loading Wintun function %s: %s", name, winerror(GetLastError()));
+        return false;
+    }
+    return true;
+}
+
+#define LOAD_WINTUN_FUNCTION(info, name) \
+    load_wintun_function((info)->wintun_module, (FARPROC *)&(info)->name, #name)
+
+static bool utf8_to_wide(const char *source, wchar_t *dest, int dest_length)
+{
+    int result = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, source, -1,
+                                     dest, dest_length);
+    if (!result)
+        result = MultiByteToWideChar(CP_ACP, 0, source, -1, dest, dest_length);
+    return result != 0;
+}
+
+static HMODULE load_wintun_module(void)
+{
+    wchar_t path[MAX_PATH];
+    wchar_t *separator;
+    DWORD length = GetModuleFileNameW(NULL, path, MAX_PATH);
+
+    if (!length || length >= MAX_PATH)
+        return NULL;
+
+    separator = wcsrchr(path, L'\\');
+    if (!separator || separator - path + 12 >= MAX_PATH)
+    {
+        SetLastError(ERROR_BAD_PATHNAME);
+        return NULL;
+    }
+
+    wcscpy(separator + 1, L"wintun.dll");
+    return LoadLibraryExW(path, NULL, LOAD_WITH_ALTERED_SEARCH_PATH);
+}
+
+static bool start_wintun_adapter(struct adapter_info *adapter_info,
+                                 const char *adapter_name, char *name)
+{
+    wchar_t adapter_name_wide[VTUN_DEV_LEN];
+    DWORD last_error;
+
+    if (!utf8_to_wide(adapter_name, adapter_name_wide, VTUN_DEV_LEN))
+        return false;
+
+    adapter_info->wintun_adapter = adapter_info->WintunOpenAdapter(adapter_name_wide);
+    if (!adapter_info->wintun_adapter)
+        adapter_info->wintun_adapter = adapter_info->WintunCreateAdapter(
+            adapter_name_wide, L"Hans", NULL);
+    if (!adapter_info->wintun_adapter)
+        return false;
+
+    adapter_info->wintun_session = adapter_info->WintunStartSession(
+        adapter_info->wintun_adapter, WINTUN_RING_CAPACITY);
+    if (!adapter_info->wintun_session)
+    {
+        last_error = GetLastError();
+        adapter_info->WintunCloseAdapter(adapter_info->wintun_adapter);
+        adapter_info->wintun_adapter = NULL;
+        SetLastError(last_error);
+        return false;
+    }
+
+    strncpy(name, adapter_name, VTUN_DEV_LEN - 1);
+    name[VTUN_DEV_LEN - 1] = '\0';
+    adapter_info->use_wintun = true;
+    noerror();
+    return true;
+}
+
+static bool open_wintun_adapter(struct adapter_info *adapter_info, char *name)
+{
+    char candidate[VTUN_DEV_LEN];
+    DWORD last_error = ERROR_NOT_FOUND;
+    int index;
+
+    adapter_info->wintun_module = load_wintun_module();
+    if (!adapter_info->wintun_module)
+    {
+        error("could not open TAP adapter; loading wintun.dll fallback: %s",
+              winerror(GetLastError()));
+        return false;
+    }
+
+    if (!LOAD_WINTUN_FUNCTION(adapter_info, WintunCreateAdapter) ||
+        !LOAD_WINTUN_FUNCTION(adapter_info, WintunOpenAdapter) ||
+        !LOAD_WINTUN_FUNCTION(adapter_info, WintunCloseAdapter) ||
+        !LOAD_WINTUN_FUNCTION(adapter_info, WintunStartSession) ||
+        !LOAD_WINTUN_FUNCTION(adapter_info, WintunEndSession) ||
+        !LOAD_WINTUN_FUNCTION(adapter_info, WintunGetReadWaitEvent) ||
+        !LOAD_WINTUN_FUNCTION(adapter_info, WintunReceivePacket) ||
+        !LOAD_WINTUN_FUNCTION(adapter_info, WintunReleaseReceivePacket) ||
+        !LOAD_WINTUN_FUNCTION(adapter_info, WintunAllocateSendPacket) ||
+        !LOAD_WINTUN_FUNCTION(adapter_info, WintunSendPacket))
+        return false;
+
+    if (name && name[0])
+    {
+        if (start_wintun_adapter(adapter_info, name, name))
+            return true;
+        error("opening or creating Wintun adapter '%s': %s", name,
+              winerror(GetLastError()));
+        return false;
+    }
+
+    for (index = 1; index < 256; index++)
+    {
+        snprintf(candidate, sizeof(candidate), "hans%d", index);
+        if (start_wintun_adapter(adapter_info, candidate, name))
+            return true;
+        last_error = GetLastError();
+    }
+
+    error("could not find an available Wintun name from hans1 through hans255: %s",
+          winerror(last_error));
+    return false;
 }
 
 static HANDLE open_tap_adapter(char *name)
@@ -168,6 +315,46 @@ static __stdcall DWORD reader_thread(LPVOID ptr)
     DWORD len;
     int wait_result;
 
+    if (adapter_info->use_wintun)
+    {
+        DWORD read_error;
+        while (true)
+        {
+            BYTE *packet = adapter_info->WintunReceivePacket(
+                adapter_info->wintun_session, &len);
+            if (packet)
+            {
+                if (write(adapter_info->reader_write_fd, packet, len) != (int)len)
+                {
+                    adapter_info->WintunReleaseReceivePacket(
+                        adapter_info->wintun_session, packet);
+                    syslog(LOG_ERR, "error forwarding packet from Wintun: %s",
+                           strerror(errno));
+                    return 1;
+                }
+                adapter_info->WintunReleaseReceivePacket(
+                    adapter_info->wintun_session, packet);
+                continue;
+            }
+
+            read_error = GetLastError();
+            if (read_error == ERROR_NO_MORE_ITEMS)
+            {
+                wait_result = WaitForSingleObject(
+                    adapter_info->WintunGetReadWaitEvent(adapter_info->wintun_session),
+                    INFINITE);
+                if (wait_result == WAIT_OBJECT_0)
+                    continue;
+            }
+            else if (read_error == ERROR_HANDLE_EOF)
+                return 0;
+
+            syslog(LOG_ERR, "error reading from Wintun adapter: %s",
+                   winerror(read_error));
+            return 1;
+        }
+    }
+
     memset(&overlapped, 0, sizeof(overlapped));
     overlapped.hEvent = CreateEvent(NULL, true, false, NULL);
 
@@ -219,14 +406,15 @@ int tun_open(char *dev)
     adapter_info->reader_write_fd = socket_pair[1];
 
     adapter_info->adapter_handle = open_tap_adapter(dev);
-    if (adapter_info->adapter_handle == INVALID_HANDLE_VALUE)
+    if (adapter_info->adapter_handle == INVALID_HANDLE_VALUE &&
+        !open_wintun_adapter(adapter_info, dev))
     {
         tun_close(adapter_info->reader_read_fd, NULL);
         return -1;
     }
 
     adapter_info->reader_thread = CreateThread(NULL, 0, reader_thread, adapter_info, 0, NULL);
-    if (adapter_info->reader_thread == INVALID_HANDLE_VALUE)
+    if (adapter_info->reader_thread == NULL)
     {
         error("reader thread creation: %s", winerror(GetLastError()));
         tun_close(adapter_info->reader_read_fd, NULL);
@@ -240,10 +428,10 @@ int tun_close(int fd, char *dev)
 {
     struct adapter_info *adapter_info = get_adapter_info_from_fd(fd);
 
-    if (adapter_info->reader_thread != INVALID_HANDLE_VALUE)
+    if (adapter_info->reader_thread != NULL)
     {
         TerminateThread(adapter_info->reader_thread, 0);
-        adapter_info->reader_thread = INVALID_HANDLE_VALUE;
+        adapter_info->reader_thread = NULL;
     }
 
     close(adapter_info->reader_read_fd);
@@ -258,6 +446,26 @@ int tun_close(int fd, char *dev)
         adapter_info->adapter_handle = INVALID_HANDLE_VALUE;
     }
 
+    if (adapter_info->wintun_session)
+    {
+        adapter_info->WintunEndSession(adapter_info->wintun_session);
+        adapter_info->wintun_session = NULL;
+    }
+
+    if (adapter_info->wintun_adapter)
+    {
+        adapter_info->WintunCloseAdapter(adapter_info->wintun_adapter);
+        adapter_info->wintun_adapter = NULL;
+    }
+
+    if (adapter_info->wintun_module)
+    {
+        FreeLibrary(adapter_info->wintun_module);
+        adapter_info->wintun_module = NULL;
+    }
+
+    adapter_info->use_wintun = false;
+
     return 0;
 }
 
@@ -266,6 +474,21 @@ int tun_write(int fd, char *buf, int len)
     struct adapter_info *adapter_info = get_adapter_info_from_fd(fd);
     OVERLAPPED overlapped;
     DWORD written;
+
+    if (adapter_info->use_wintun)
+    {
+        BYTE *packet = adapter_info->WintunAllocateSendPacket(
+            adapter_info->wintun_session, len);
+        if (!packet)
+        {
+            error("allocating Wintun send packet: %s", winerror(GetLastError()));
+            return -1;
+        }
+        memcpy(packet, buf, len);
+        adapter_info->WintunSendPacket(adapter_info->wintun_session, packet);
+        noerror();
+        return len;
+    }
 
     memset(&overlapped, 0, sizeof(overlapped));
 
@@ -297,6 +520,14 @@ bool tun_set_ip(int fd, uint32_t local, uint32_t network, uint32_t netmask)
     uint32_t addresses[3];
     DWORD status;
     DWORD len;
+
+    /* Wintun is configured through netsh in Tun::setIp(). The TAP-specific
+     * control requests below do not apply to its layer-3 ring interface. */
+    if (adapter_info->use_wintun)
+    {
+        noerror();
+        return true;
+    }
 
     addresses[0] = htonl(local);
     addresses[1] = htonl(network);

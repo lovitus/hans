@@ -64,6 +64,28 @@ jobs:
             -v "${{ github.workspace }}/scripts:/tests:ro" \
             "${{ matrix.runtime_image }}" \
             sh /tests/test-hans.sh /product/hans "linux-${{ matrix.label }}-packaged"
+      - name: Test packaged Linux veth fallback
+        run: |
+          docker run --rm \
+            --cap-add NET_ADMIN --cap-add NET_RAW \
+            -e HANS_FORCE_VETH=1 \
+            -v "${{ github.workspace }}/dist/${{ matrix.label }}:/product:ro" \
+            "${{ matrix.runtime_image }}" \
+            bash -c '
+              set -e
+              apt-get update -qq
+              apt-get install -y -qq iproute2
+              /product/hans -c 127.0.0.1 -p hans-veth-ci -f -v >/tmp/hans.out 2>&1 &
+              pid=$!
+              for attempt in 1 2 3 4 5; do
+                ip link show hans1 >/dev/null 2>&1 && break
+                sleep 1
+              done
+              ip link show hans1
+              kill "$pid" 2>/dev/null || true
+              wait "$pid" 2>/dev/null || true
+              ! grep -q "could not create tunnel device" /tmp/hans.out
+            '
       - uses: actions/upload-artifact@v4
         with:
           name: hans-linux-${{ matrix.label }}
@@ -284,11 +306,13 @@ jobs:
         include:
           - arch: amd64
             cygwin_root: C:\tools\cygwin
+            wintun_arch: amd64
             maintained: true
           # Cygwin 3.3.6 is the final x86 release. Build against Cygwin's
           # official frozen 2022 archive and run it under WOW64.
           - arch: i386
             cygwin_root: C:\tools\cygwin32
+            wintun_arch: x86
             maintained: false
     steps:
       - uses: actions/checkout@v4
@@ -320,6 +344,22 @@ jobs:
           if ($process.ExitCode -ne 0) {
             throw "32-bit Cygwin setup failed with exit code $($process.ExitCode)"
           }
+      - name: Fetch verified official Wintun runtime
+        shell: pwsh
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP 'wintun-0.14.1.zip'
+          Invoke-WebRequest 'https://www.wintun.net/builds/wintun-0.14.1.zip' -OutFile $archive
+          $actual = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
+          $expected = '07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51'
+          if ($actual -ne $expected) {
+            throw "Wintun archive checksum mismatch: $actual"
+          }
+          $expanded = Join-Path $env:RUNNER_TEMP 'wintun-0.14.1'
+          Expand-Archive -LiteralPath $archive -DestinationPath $expanded
+          Copy-Item (Join-Path $expanded 'wintun\bin\${{ matrix.wintun_arch }}\wintun.dll') `
+            (Join-Path $env:GITHUB_WORKSPACE 'wintun.dll')
+          Copy-Item (Join-Path $expanded 'wintun\LICENSE.txt') `
+            (Join-Path $env:GITHUB_WORKSPACE 'WINTUN-LICENSE.txt')
       - name: Build, test, and verify static runtime linkage
         shell: pwsh
         run: |
@@ -369,10 +409,9 @@ jobs:
             throw "Packaged hans.exe failed peer-list test: $peers"
           }
 
-          # Exercise the actual Cygwin tunnel initialization in the stripped
-          # package. A runner normally has no TAP adapter, so reaching that
-          # error (or staying alive) is acceptable; socketpair must never fail
-          # with EPROTONOSUPPORT as it did when PF_UNIX was passed as protocol.
+          # Exercise the stripped package after the full toolchain has been
+          # removed. With no TAP adapter, the bundled Wintun fallback must
+          # create an adapter and keep the client alive long enough to connect.
           $probeOut = Join-Path $state 'tun-probe.out'
           $probeErr = Join-Path $state 'tun-probe.err'
           $probe = Start-Process -FilePath $exe `
@@ -385,8 +424,8 @@ jobs:
             $probe.WaitForExit()
           }
           $probeText = (Get-Content $probeOut, $probeErr -Raw -ErrorAction SilentlyContinue) -join "`n"
-          if ($probeText -match 'creating socket pair|Protocol not supported') {
-            throw "Packaged hans.exe failed Cygwin tunnel socket initialization: $probeText"
+          if ($probeText -match 'creating socket pair|Protocol not supported|could not create tunnel device|loading wintun.dll fallback|opening or creating Wintun adapter') {
+            throw "Packaged hans.exe failed tunnel adapter initialization: $probeText"
           }
           # No arguments intentionally prints usage and exits non-zero.
           exit 0
@@ -396,6 +435,8 @@ jobs:
           path: |
             dist/windows-${{ matrix.arch }}/hans.exe
             dist/windows-${{ matrix.arch }}/cygwin1.dll
+            dist/windows-${{ matrix.arch }}/wintun.dll
+            dist/windows-${{ matrix.arch }}/WINTUN-LICENSE.txt
 
   # ---------------------------------------------------------------------
   # FreeBSD: amd64, aarch64, riscv64, powerpc64 across kernel releases.
@@ -597,7 +638,8 @@ jobs:
               # because the loader looks specifically for "cygwin1.dll".
               (
                 cd "$d"
-                zip -q "$GITHUB_WORKSPACE/release/$name.zip" hans.exe cygwin1.dll
+                zip -q "$GITHUB_WORKSPACE/release/$name.zip" \
+                  hans.exe cygwin1.dll wintun.dll WINTUN-LICENSE.txt
               )
               continue
             fi

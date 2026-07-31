@@ -22,7 +22,8 @@ deployment, compatibility, and peer-management features:
 | Broad release matrix | GitHub Actions builds Linux, macOS, Windows/Cygwin (amd64 and legacy i386), FreeBSD, OpenBSD, and NetBSD binaries for the CPU architectures supported by the codebase. |
 | Static releases | Linux and BSD release binaries are fully static. Windows compiler/C++ runtimes are embedded in the executable; macOS uses only operating-system libraries. Release binaries are stripped before their isolated package tests to avoid shipping debug symbols. |
 | Old-Linux support | Statically linked musl binaries avoid glibc version dependencies and run on systems such as CentOS 7, older distributions, embedded Linux, and Alpine. |
-| Runtime packaging | Windows compiler and C++ runtimes are linked into `hans.exe`; only the unavoidable `cygwin1.dll` is bundled, allowing use without a separate Cygwin installation. |
+| Adapter fallback | Windows prefers an installed TAP-Windows adapter and automatically falls back to bundled Wintun. Linux prefers TUN and falls back to a veth pair plus `AF_PACKET` when TUN is unavailable. Auto-created interfaces use `hans1`, then `hans2`, and so on. |
+| Runtime packaging | Windows compiler and C++ runtimes are linked into `hans.exe`; the package includes the unavoidable `cygwin1.dll` and the signed official `wintun.dll`, allowing use without a separate Cygwin installation. |
 | Automated validation | Every build checks version/help output and persistent identity/lease commands, then repeats those checks from an isolated product directory without the compiler or development environment. Environments with root and TUN support additionally attempt a real client/server tunnel connection. |
 | Continuous releases | Successful builds are collected and published automatically on the [Releases page](../../releases). |
 
@@ -54,15 +55,16 @@ and NetBSD (amd64/aarch64/riscv64/powerpc64, several releases each) are
 published automatically on the [Releases page](../../releases). Windows users
 should download `hans-windows-amd64-cygwin.zip` on normal 64-bit systems, or
 the legacy `hans-windows-i386-cygwin.zip` when 32-bit support is required.
-Extract `hans.exe` and `cygwin1.dll` into the same directory; the DLL must keep
-its exact filename. Cygwin ended x86 maintenance at version 3.3.6, so amd64 is
+Extract all four files—`hans.exe`, `cygwin1.dll`, `wintun.dll`, and
+`WINTUN-LICENSE.txt`—into the same directory; the DLLs must keep their exact
+filenames. Cygwin ended x86 maintenance at version 3.3.6, so amd64 is
 recommended whenever the operating system supports it.
 
-The Windows client also requires an installed **TAP-Windows** adapter and an
-elevated PowerShell or Command Prompt. Hans opens the TAP device through its
-`.tap` driver interface; a Wintun-only installation is not sufficient. Use
-`-d "adapter name"` when more than one TAP adapter exists or when a specific
-adapter should be selected.
+Run the Windows client from an elevated PowerShell or Command Prompt. Hans
+first uses an installed **TAP-Windows** adapter. If none can be opened, it
+loads the bundled, signed official Wintun runtime and creates `hans1` (or
+`hans2`, `hans3`, ... when earlier names are occupied). `-d "adapter name"`
+still requests an exact TAP/Wintun name.
 
 **Linux: which binary should I use?**
 
@@ -118,8 +120,9 @@ sudo ./hans -c server.example.com -p my-secret-passphrase -f -v
 - `-p my-secret-passphrase` — must match the server.
 
 On success you'll see `connection established` on both sides, and a new
-`tunX`/`utunX` interface will appear carrying the `10.0.0.0/24` tunnel
-network (client gets `10.0.0.100`, `10.0.0.101`, ... automatically).
+`hans1` (or the platform's native `utunX`) interface will appear carrying the
+`10.0.0.0/24` tunnel network (client gets `10.0.0.100`, `10.0.0.101`, ...
+automatically).
 
 ### 3. Verify the tunnel
 
@@ -127,6 +130,14 @@ network (client gets `10.0.0.100`, `10.0.0.101`, ... automatically).
 ip addr show          # look for the new tun interface (Linux)
 ping 10.0.0.1          # ping the server over the tunnel
 ```
+
+On Linux, Hans normally creates a kernel TUN interface. If `/dev/net/tun` is
+missing or unusable, it automatically creates a veth pair and uses an
+`AF_PACKET` socket as its layer-3 backend. This fallback still needs
+`CAP_NET_ADMIN` and `CAP_NET_RAW`, kernel veth support, and the `ip` command
+from iproute2; it cannot bypass missing privileges. The public interface is
+named `hans1`, then `hans2`, and so on. The private peer is removed with it
+when Hans exits.
 
 ---
 
@@ -148,8 +159,8 @@ tunnel itself doesn't loop):
 
 ```sh
 sudo ip route add <server-real-ip> via <your-current-gateway>
-sudo ip route add 0.0.0.0/1 dev tun0
-sudo ip route add 128.0.0.0/1 dev tun0
+sudo ip route add 0.0.0.0/1 dev hans1
+sudo ip route add 128.0.0.0/1 dev hans1
 ```
 
 ## Run unprivileged after startup
@@ -235,7 +246,7 @@ sudo ./hans -s 10.0.0.0 -p secret -r
 | `-w polls` | Number of echo requests the client pre-sends for the server to piggy-back replies on (default `10`, `0` disables polling). Increase on high-latency links; set to `0` if the network allows unlimited unsolicited echo replies. |
 | `-i` | Change the ICMP echo **id** on every request (client only). Helps with routers/firewalls that get confused by a static id. |
 | `-q` | Change the ICMP echo **sequence number** on every request (client only). Same rationale as `-i`. |
-| `-d device` | Force a specific `tun` device name/number instead of auto-selecting one. |
+| `-d device` | Force a specific virtual interface name instead of auto-selecting `hans1`, `hans2`, and so on. |
 
 ## Running as a systemd service (Linux)
 

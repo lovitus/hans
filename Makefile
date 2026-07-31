@@ -31,7 +31,7 @@ build/echo.o: src/echo.cpp src/echo.h src/exception.h
 build/tun.o: src/tun.cpp src/tun.h src/exception.h src/utility.h src/tun_dev.h
 	$(GPP) -c src/tun.cpp -o $@ $(CPPFLAGS)
 
-build/tun_dev.o:
+build/tun_dev.o: src/tun_dev.h src/wintun_compat.h
 	$(GCC) -c $(TUN_DEV_FILE) -o build/tun_dev.o -o $@ $(CFLAGS)
 
 build/sha1.o: src/sha1.cpp src/sha1.h

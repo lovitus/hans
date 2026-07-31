@@ -1,7 +1,7 @@
 #!/bin/sh
 # Build and package Hans with the Cygwin C++ runtimes embedded in hans.exe.
-# Cygwin itself cannot be linked statically, so cygwin1.dll is intentionally
-# the only non-system DLL shipped next to the executable.
+# Cygwin itself cannot be linked statically. The official signed wintun.dll is
+# also shipped as the automatic fallback when no usable TAP adapter exists.
 
 set -eu
 
@@ -10,6 +10,13 @@ LABEL="${1:?usage: build-windows-cygwin.sh <architecture-label>}"
 if [ -n "${GITHUB_WORKSPACE:-}" ]; then
     cd "$(cygpath -u "$GITHUB_WORKSPACE")"
 fi
+
+for required in wintun.dll WINTUN-LICENSE.txt; do
+    if [ ! -f "$required" ]; then
+        echo "Missing Windows package input: $required" >&2
+        exit 1
+    fi
+done
 
 make \
     CPPFLAGS='-c -g -std=gnu++98 -fpermissive -Wall -Wextra -Wno-sign-compare -Wno-missing-field-initializers -DWIN32' \
@@ -44,9 +51,10 @@ fi
 
 PACKAGE_DIR="dist/windows-$LABEL"
 mkdir -p "$PACKAGE_DIR"
-cp hans.exe /bin/cygwin1.dll "$PACKAGE_DIR/"
+cp hans.exe /bin/cygwin1.dll wintun.dll WINTUN-LICENSE.txt "$PACKAGE_DIR/"
 
 echo "Packaged Windows $LABEL files:"
-ls -la "$PACKAGE_DIR/hans.exe" "$PACKAGE_DIR/cygwin1.dll"
+ls -la "$PACKAGE_DIR/hans.exe" "$PACKAGE_DIR/cygwin1.dll" \
+    "$PACKAGE_DIR/wintun.dll" "$PACKAGE_DIR/WINTUN-LICENSE.txt"
 echo "PE imports:"
 objdump -p hans.exe | awk '/DLL Name:/ { print $3 }'
