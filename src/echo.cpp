@@ -19,6 +19,7 @@
 
 #include "echo.h"
 #include "exception.h"
+#include "config.h"
 
 #include <sys/socket.h>
 #include <sys/types.h>
@@ -57,7 +58,6 @@ namespace
     };
 
     const DWORD HANS_IP_SUCCESS = 0;
-    const int HANS_WINDOWS_MAX_PENDING = 60;
 }
 
 class Echo::WindowsBackend
@@ -238,7 +238,7 @@ private:
 
     void startQueued()
     {
-        while (active.size() < HANS_WINDOWS_MAX_PENDING)
+        while (active.size() < WINDOWS_ICMP_MAX_PENDING)
         {
             pthread_mutex_lock(&mutex);
             if (queued.empty())
@@ -255,7 +255,7 @@ private:
                 request->payload.empty() ? NULL : &request->payload[0],
                 (unsigned short)request->payload.size(), NULL,
                 &request->replyBuffer[0], (DWORD)request->replyBuffer.size(),
-                2000);
+                WINDOWS_ICMP_REQUEST_TIMEOUT_MS);
             if (result > 0)
                 complete(request);
             else if (GetLastError() == ERROR_IO_PENDING)

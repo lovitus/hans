@@ -44,8 +44,6 @@ namespace
     const int DIRECT_REPROBE_INTERVAL_MS = 30000;
     const int DIRECT_HEARTBEAT_MS = 1000;
     const int DIRECT_WATCHDOG_MS = 5000;
-    const int CREDIT_REFRESH_MS = 5000;
-
     uint32_t get32(const char *buffer)
     {
         uint32_t value;
@@ -84,6 +82,15 @@ Client::Client(int tunnelMtu, const string *deviceName, uint32_t serverIp,
     this->directProbeReplies = 0;
     this->userspaceNetwork = userspace ?
         new UserspaceNetwork(this, tunnelMtu, socksAddress, sharePorts) : NULL;
+#ifdef WIN32
+    if (userspace)
+    {
+        // IcmpSendEcho2 requests have a finite lifetime.  Bound the adaptive
+        // credit window so a full replacement window can be issued before
+        // the previous one expires, leaving no idle receive gap.
+        adaptiveCredit = AdaptiveCredit(2, WINDOWS_ICMP_MAX_CREDITS, 4);
+    }
+#endif
 
     state = STATE_CLOSED;
 }

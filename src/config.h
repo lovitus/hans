@@ -25,6 +25,16 @@
 #define KEEP_ALIVE_INTERVAL (60 * 1000)
 #define POLL_INTERVAL 2000
 
+// Credit requests are deliberately held by the server until tunnel data is
+// available.  A refresh has to overlap the lifetime of an outstanding
+// Windows IP Helper request; otherwise the server can reply to an echo token
+// that IcmpSendEcho2 has already expired.
+#define CREDIT_REFRESH_MS 5000
+#define WINDOWS_ICMP_REQUEST_TIMEOUT_MS 6000
+#define WINDOWS_ICMP_MAX_PENDING 60
+// Keep two complete adaptive windows live during the refresh overlap.
+#define WINDOWS_ICMP_MAX_CREDITS (WINDOWS_ICMP_MAX_PENDING / 2)
+
 #define CHALLENGE_SIZE 20
 
 #define DEVICE_ID_HEX_SIZE 32

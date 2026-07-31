@@ -40,7 +40,7 @@ build/utility.o: src/utility.cpp src/utility.h src/exception.h src/config.h
 build/exception.o: src/exception.cpp src/exception.h
 	$(GPP) -c src/exception.cpp -o $@ $(CPPFLAGS)
 
-build/echo.o: src/echo.cpp src/echo.h src/exception.h
+build/echo.o: src/echo.cpp src/echo.h src/exception.h src/config.h
 	$(GPP) -c src/echo.cpp -o $@ $(CPPFLAGS)
 
 build/tun.o: src/tun.cpp src/tun.h src/exception.h src/utility.h src/tun_dev.h
