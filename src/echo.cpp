@@ -33,24 +33,27 @@
 
 namespace
 {
-    struct HansIpOptionInformation
+    // IcmpParseReplies uses the 32-bit wire-compatible reply layout even in a
+    // 64-bit process.  Keeping these fields explicitly 32-bit also lets the
+    // same parser work in the x86 Cygwin build.
+    struct HansIpOptionInformation32
     {
         unsigned char ttl;
         unsigned char tos;
         unsigned char flags;
         unsigned char optionsSize;
-        unsigned char *optionsData;
+        uint32_t optionsData;
     };
 
-    struct HansIcmpEchoReply
+    struct HansIcmpEchoReply32
     {
         DWORD address;
         DWORD status;
         DWORD roundTripTime;
         unsigned short dataSize;
         unsigned short reserved;
-        void *data;
-        HansIpOptionInformation options;
+        uint32_t data;
+        HansIpOptionInformation32 options;
     };
 
     const DWORD HANS_IP_SUCCESS = 0;
@@ -74,13 +77,15 @@ public:
     typedef BOOL (WINAPI *CloseHandleFunction)(HANDLE);
     typedef DWORD (WINAPI *SendEchoFunction)(HANDLE, HANDLE, FARPROC, void *,
                                               DWORD, void *, unsigned short,
-                                              HansIpOptionInformation *, void *,
+                                              void *, void *,
                                               DWORD, DWORD);
+    typedef DWORD (WINAPI *ParseRepliesFunction)(void *, DWORD);
 
     WindowsBackend(int maxPayloadSize)
         : library(NULL), icmpHandle(INVALID_HANDLE_VALUE), wakeEvent(NULL),
           stopping(false), threadStarted(false), createFileFunction(NULL),
-          closeHandleFunction(NULL), sendEchoFunction(NULL)
+          closeHandleFunction(NULL), sendEchoFunction(NULL),
+          parseRepliesFunction(NULL)
     {
         pipeFds[0] = pipeFds[1] = -1;
         library = LoadLibraryA("iphlpapi.dll");
@@ -92,8 +97,10 @@ public:
             GetProcAddress(library, "IcmpCloseHandle"));
         sendEchoFunction = reinterpret_cast<SendEchoFunction>(
             GetProcAddress(library, "IcmpSendEcho2"));
+        parseRepliesFunction = reinterpret_cast<ParseRepliesFunction>(
+            GetProcAddress(library, "IcmpParseReplies"));
         if (createFileFunction == NULL || closeHandleFunction == NULL ||
-            sendEchoFunction == NULL)
+            sendEchoFunction == NULL || parseRepliesFunction == NULL)
             throw Exception("resolving Windows ICMP API");
 
         icmpHandle = createFileFunction();
@@ -147,7 +154,7 @@ public:
     {
         Request *request = new Request;
         request->payload.assign(payload, payload + length);
-        request->replyBuffer.resize(sizeof(HansIcmpEchoReply) + length + 32);
+        request->replyBuffer.resize(sizeof(HansIcmpEchoReply32) + length + 32);
         request->realIp = realIp;
         request->id = id;
         request->seq = seq;
@@ -178,12 +185,37 @@ public:
         completed.pop_front();
         pthread_mutex_unlock(&mutex);
 
-        HansIcmpEchoReply *reply = reinterpret_cast<HansIcmpEchoReply *>(
+        DWORD replyCount = parseRepliesFunction(&request->replyBuffer[0],
+                                                 (DWORD)request->replyBuffer.size());
+        HansIcmpEchoReply32 *reply = reinterpret_cast<HansIcmpEchoReply32 *>(
             &request->replyBuffer[0]);
-        bool valid = reply->status == HANS_IP_SUCCESS && reply->data != NULL;
+        const char *bufferBegin = &request->replyBuffer[0];
+        uintptr_t bufferAddress = reinterpret_cast<uintptr_t>(bufferBegin);
+        uintptr_t bufferEndAddress = bufferAddress + request->replyBuffer.size();
+        uintptr_t dataAddress = (uintptr_t)reply->data;
+#if UINTPTR_MAX > 0xffffffffU
+        // POINTER_32 contains the low half of an address in a 64-bit reply.
+        // Reply data lives in ReplyBuffer, so recover the buffer's high half.
+        dataAddress |= (bufferAddress & ~((uintptr_t)0xffffffffU));
+#endif
+        bool dataInBuffer = dataAddress >= bufferAddress &&
+                            dataAddress <= bufferEndAddress &&
+                            bufferEndAddress - dataAddress >= reply->dataSize;
+        const char *data = reinterpret_cast<const char *>(dataAddress);
+        if (!dataInBuffer &&
+            request->replyBuffer.size() >= sizeof(HansIcmpEchoReply32) +
+                                                   reply->dataSize)
+        {
+            // The no-options layout is deterministic for our requests.  This
+            // also covers implementations that leave POINTER_32 unusable to a
+            // non-MSVC 64-bit compiler.
+            data = bufferBegin + sizeof(HansIcmpEchoReply32);
+            dataInBuffer = true;
+        }
+        bool valid = replyCount > 0 && reply->status == HANS_IP_SUCCESS &&
+                     dataInBuffer;
         if (valid)
         {
-            const char *data = static_cast<const char *>(reply->data);
             payload.assign(data, data + reply->dataSize);
             realIp = ntohl(reply->address);
             id = request->id;
@@ -295,6 +327,7 @@ private:
     CreateFileFunction createFileFunction;
     CloseHandleFunction closeHandleFunction;
     SendEchoFunction sendEchoFunction;
+    ParseRepliesFunction parseRepliesFunction;
     std::deque<Request *> queued;
     std::deque<Request *> active;
     std::deque<Request *> completed;
