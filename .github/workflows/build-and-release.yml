@@ -58,6 +58,7 @@ jobs:
           mkdir -p "dist/${{ matrix.label }}"
           cp hans "dist/${{ matrix.label }}/hans"
           docker run --rm \
+            -e HANS_SKIP_CONNECTION_TEST=1 \
             -v "${{ github.workspace }}/dist/${{ matrix.label }}:/product:ro" \
             -v "${{ github.workspace }}/scripts:/tests:ro" \
             "${{ matrix.runtime_image }}" \
@@ -131,6 +132,7 @@ jobs:
       - name: Test packaged binary in a fresh container
         run: |
           docker run --rm --platform ${{ matrix.platform }} \
+            -e HANS_SKIP_CONNECTION_TEST=1 \
             -v "${{ github.workspace }}/dist/${{ matrix.label }}:/product:ro" \
             -v "${{ github.workspace }}/scripts:/tests:ro" \
             ${{ matrix.image }} \
@@ -204,6 +206,7 @@ jobs:
       - name: Test packaged binary in a fresh Alpine container
         run: |
           docker run --rm --platform ${{ matrix.platform }} \
+            -e HANS_SKIP_CONNECTION_TEST=1 \
             -v "${{ github.workspace }}/dist/${{ matrix.label }}:/product:ro" \
             -v "${{ github.workspace }}/scripts:/tests:ro" \
             alpine:3.20 \
@@ -251,6 +254,7 @@ jobs:
             PATH=/usr/bin:/bin:/usr/sbin:/sbin \
             HOME="$RUNNER_TEMP" \
             TMPDIR="$RUNNER_TEMP" \
+            HANS_SKIP_CONNECTION_TEST=1 \
             sh scripts/test-hans.sh "$(pwd)/dist/${{ matrix.label }}/hans" "macos-${{ matrix.label }}-packaged"
       - uses: actions/upload-artifact@v4
         with:
@@ -415,7 +419,7 @@ jobs:
             mkdir -p "$product"
             cp hans "$product/hans-freebsd-${{ matrix.release }}-${{ matrix.arch }}"
             file "$product/hans-freebsd-${{ matrix.release }}-${{ matrix.arch }}" | grep -qi 'statically linked'
-            env -i PATH=/bin:/usr/bin:/sbin:/usr/sbin HOME=/tmp TMPDIR=/tmp \
+            env -i PATH=/bin:/usr/bin:/sbin:/usr/sbin HOME=/tmp TMPDIR=/tmp HANS_SKIP_CONNECTION_TEST=1 \
               sh "$GITHUB_WORKSPACE/scripts/test-hans.sh" \
               "$product/hans-freebsd-${{ matrix.release }}-${{ matrix.arch }}" \
               "freebsd-${{ matrix.release }}-${{ matrix.arch }}-packaged"
@@ -471,7 +475,7 @@ jobs:
               cat /tmp/hans-ldd.txt >&2
               exit 1
             fi
-            env -i PATH=/bin:/usr/bin:/sbin:/usr/sbin HOME=/tmp TMPDIR=/tmp \
+            env -i PATH=/bin:/usr/bin:/sbin:/usr/sbin HOME=/tmp TMPDIR=/tmp HANS_SKIP_CONNECTION_TEST=1 \
               sh "$GITHUB_WORKSPACE/scripts/test-hans.sh" \
               "$product/hans-openbsd-${{ matrix.release }}-${{ matrix.arch }}" \
               "openbsd-${{ matrix.release }}-${{ matrix.arch }}-packaged"
@@ -525,7 +529,7 @@ jobs:
             mkdir -p "$product"
             cp hans "$product/hans-netbsd-${{ matrix.release }}-${{ matrix.arch }}"
             file "$product/hans-netbsd-${{ matrix.release }}-${{ matrix.arch }}" | grep -qi 'statically linked'
-            env -i PATH=/bin:/usr/bin:/sbin:/usr/sbin HOME=/tmp TMPDIR=/tmp \
+            env -i PATH=/bin:/usr/bin:/sbin:/usr/sbin HOME=/tmp TMPDIR=/tmp HANS_SKIP_CONNECTION_TEST=1 \
               sh "$GITHUB_WORKSPACE/scripts/test-hans.sh" \
               "$product/hans-netbsd-${{ matrix.release }}-${{ matrix.arch }}" \
               "netbsd-${{ matrix.release }}-${{ matrix.arch }}-packaged"

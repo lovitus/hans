@@ -74,6 +74,11 @@ fi
 # ---------------------------------------------------------------------------
 # 4. Best-effort loopback client/server connection test.
 # ---------------------------------------------------------------------------
+if [ "${HANS_SKIP_CONNECTION_TEST:-0}" = "1" ]; then
+    echo "EXEMPT [$LABEL]: connection test already ran before packaging; isolated package smoke test complete"
+    exit 0
+fi
+
 SUDO=""
 CAN_ROOT=1
 if [ "$(id -u 2>/dev/null || echo 1)" != "0" ]; then
