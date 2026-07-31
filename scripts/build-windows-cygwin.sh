@@ -13,7 +13,7 @@ fi
 
 make \
     CPPFLAGS='-c -g -std=gnu++98 -fpermissive -Wall -Wextra -Wno-sign-compare -Wno-missing-field-initializers -DWIN32' \
-    LDFLAGS='-static-libgcc -static-libstdc++'
+    LDFLAGS='-static'
 
 # Cygwin creates hans.exe even though the Makefile target is named "hans".
 if [ -f hans.exe ] && [ ! -f hans ]; then

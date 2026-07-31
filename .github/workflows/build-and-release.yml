@@ -288,7 +288,7 @@ jobs:
         if: matrix.maintained
         uses: egor-tensin/setup-cygwin@v4
         with:
-          packages: gcc-g++ make
+          packages: gcc-g++ make libiconv-devel libintl-devel
           install-dir: ${{ matrix.cygwin_root }}
       - name: Install archived 32-bit Cygwin toolchain
         if: ${{ !matrix.maintained }}
@@ -296,18 +296,21 @@ jobs:
         run: |
           $setup = Join-Path $env:RUNNER_TEMP 'setup-x86.exe'
           Invoke-WebRequest 'https://cygwin.com/setup-x86.exe' -OutFile $setup
-          & $setup `
-            --quiet-mode `
-            --wait `
-            --no-desktop `
-            --no-shortcuts `
-            --no-startmenu `
-            --allow-unsupported-windows `
-            --root '${{ matrix.cygwin_root }}' `
-            --site 'https://mirrors.kernel.org/sourceware/cygwin-archive/20221123/' `
-            --packages 'gcc-g++,make'
-          if ($LASTEXITCODE -ne 0) {
-            throw "32-bit Cygwin setup failed with exit code $LASTEXITCODE"
+          $cache = Join-Path $env:RUNNER_TEMP 'cygwin32-cache'
+          $arguments = @(
+            '--quiet-mode',
+            '--no-desktop',
+            '--no-shortcuts',
+            '--no-startmenu',
+            '--allow-unsupported-windows',
+            '--root', '${{ matrix.cygwin_root }}',
+            '--local-package-dir', $cache,
+            '--site', 'https://mirrors.kernel.org/sourceware/cygwin-archive/20221123/',
+            '--packages', 'gcc-g++,make,libiconv-devel,libintl-devel'
+          )
+          $process = Start-Process -FilePath $setup -ArgumentList $arguments -Wait -PassThru
+          if ($process.ExitCode -ne 0) {
+            throw "32-bit Cygwin setup failed with exit code $($process.ExitCode)"
           }
       - name: Build, test, and verify static runtime linkage
         shell: pwsh
@@ -462,7 +465,11 @@ jobs:
             product="$GITHUB_WORKSPACE/dist/openbsd-${{ matrix.release }}-${{ matrix.arch }}"
             mkdir -p "$product"
             cp hans "$product/hans-openbsd-${{ matrix.release }}-${{ matrix.arch }}"
-            file "$product/hans-openbsd-${{ matrix.release }}-${{ matrix.arch }}" | grep -qi 'statically linked'
+            if ldd "$product/hans-openbsd-${{ matrix.release }}-${{ matrix.arch }}" >/tmp/hans-ldd.txt 2>&1; then
+              echo "OpenBSD package unexpectedly has dynamic dependencies:" >&2
+              cat /tmp/hans-ldd.txt >&2
+              exit 1
+            fi
             env -i PATH=/bin:/usr/bin:/sbin:/usr/sbin HOME=/tmp TMPDIR=/tmp \
               sh "$GITHUB_WORKSPACE/scripts/test-hans.sh" \
               "$product/hans-openbsd-${{ matrix.release }}-${{ matrix.arch }}" \
