@@ -82,7 +82,7 @@ void Server::handleUnknownClient(const TunnelHeader &header, int dataLength, uin
     client.maxPolls = 1;
     client.protocolV2 = header.magic == Client::v2Magic;
 
-    pollReceived(&client, echoId, echoSeq);
+    pollReceived(&client, echoId, echoSeq, false);
 
     if (header.type != TunnelHeader::TYPE_CONNECTION_REQUEST ||
         (client.protocolV2 && dataLength != sizeof(ClientConnectDataV2)) ||
@@ -236,7 +236,9 @@ bool Server::handleEchoData(const TunnelHeader &header, int dataLength, uint32_t
         return true;
     }
 
-    pollReceived(client, id, seq);
+    pollReceived(client, id, seq,
+                 client->state == ClientData::STATE_ESTABLISHED &&
+                 header.type != TunnelHeader::TYPE_CONNECTION_REQUEST);
 
     switch (header.type)
     {
@@ -324,9 +326,9 @@ void Server::handleTunData(int dataLength, uint32_t, uint32_t destIp)
 
     ClientData *client = getClientByTunnelIp(destIp);
 
-    if (client == NULL)
+    if (client == NULL || client->state != ClientData::STATE_ESTABLISHED)
     {
-        syslog(LOG_DEBUG, "data received for unknown client %s\n",
+        syslog(LOG_DEBUG, "data received for unavailable client %s\n",
                Utility::formatIp(destIp).data());
         return;
     }
@@ -334,7 +336,8 @@ void Server::handleTunData(int dataLength, uint32_t, uint32_t destIp)
     sendEchoToClient(client, TunnelHeader::TYPE_DATA, dataLength);
 }
 
-void Server::pollReceived(ClientData *client, uint16_t echoId, uint16_t echoSeq)
+void Server::pollReceived(ClientData *client, uint16_t echoId, uint16_t echoSeq,
+                          bool servePending)
 {
     unsigned int maxSavedPolls = client->maxPolls != 0 ? client->maxPolls : 1;
 
@@ -343,7 +346,7 @@ void Server::pollReceived(ClientData *client, uint16_t echoId, uint16_t echoSeq)
         client->pollIds.pop();
     DEBUG_ONLY(cout << "poll -> " << client->pollIds.size() << endl);
 
-    if (client->pendingPackets.size() > 0)
+    if (servePending && client->pendingPackets.size() > 0)
     {
         Packet &packet = client->pendingPackets.front();
         const TunnelHeader::Type packetType = packet.type;

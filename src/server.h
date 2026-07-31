@@ -130,7 +130,8 @@ protected:
 
     void sendEchoToClient(ClientData *client, TunnelHeader::Type type, int dataLength);
 
-    void pollReceived(ClientData *client, uint16_t echoId, uint16_t echoSeq);
+    void pollReceived(ClientData *client, uint16_t echoId, uint16_t echoSeq,
+                      bool servePending);
 
     uint32_t reserveTunnelIp(uint32_t desiredIp, const std::string &deviceId);
     void releaseTunnelIp(uint32_t tunnelIp, const std::string &deviceId);

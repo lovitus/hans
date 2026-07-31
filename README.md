@@ -148,7 +148,9 @@ when Hans exits.
 The veth backend disables TX checksum, scatter-gather, TSO/UFO, and GSO in
 the kernel. `AF_PACKET` otherwise sees checksum-partial or oversized offload
 frames: ping may appear healthy while TCP/UDP packets are discarded after
-crossing the tunnel.
+crossing the tunnel. Hans performs this with kernel `SIOCETHTOOL` ioctls on
+both ends of the newly created veth pair and verifies the result before using
+it; the external `ethtool` program is not required at runtime.
 
 If Hans is killed with `SIGKILL`, normal teardown cannot run. New auto-created
 veth pairs therefore carry the same random 128-bit ownership marker on both
@@ -264,7 +266,7 @@ sudo ./hans -s 10.0.0.0 -p secret -r
 | Flag | Purpose |
 | --- | --- |
 | `-m mtu` | Reference MTU of the path between client and server (default `1500`). Must match on both sides. Lower it if you see fragmentation/connectivity issues on constrained links. |
-| `-w polls` | Number of echo requests the client pre-sends for the server to piggy-back replies on (default `10`, `0` disables polling). Increase on high-latency links; set to `0` if the network allows unlimited unsolicited echo replies. |
+| `-w polls` | Number of echo requests the client pre-sends for the server to piggy-back replies on (default `10`, `0` disables polling). This chiefly limits server-to-client throughput, so increase it gradually on high-latency links (for example `30`, then `60`); larger values create more in-flight ICMP traffic. Set it to `0` only if the network allows unlimited unsolicited echo replies. |
 | `-i` | Change the ICMP echo **id** on every request (client only). Helps with routers/firewalls that get confused by a static id. |
 | `-q` | Change the ICMP echo **sequence number** on every request (client only). Same rationale as `-i`. |
 | `-d device` | Force a specific virtual interface name instead of auto-selecting `hans1`, `hans2`, and so on. |
