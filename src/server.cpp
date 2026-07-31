@@ -143,6 +143,9 @@ void Server::handleUnknownClient(const TunnelHeader &header, int dataLength, uin
     {
         ClientConnectDataV3 *connectDataV3 =
             (ClientConnectDataV3 *)echoReceivePayloadBuffer();
+        if (connectDataV3->capabilities &
+            TransportV3::CAP_WINDOWS_ICMP_HELPER)
+            kernelEchoGuard.suppress();
         client.capabilities = connectDataV3->capabilities &
                               TransportV3::ALL_CAPABILITIES;
         client.autoPoll =

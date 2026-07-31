@@ -21,18 +21,22 @@ build_dir:
 
 tunemu.o: directories build/tunemu.o
 
-hans: build/tun.o build/sha1.o build/main.o build/client.o build/server.o build/auth.o build/worker.o build/transport.o build/time.o build/tun_dev.o build/echo.o build/exception.o build/utility.o build/userspace.o $(LWIP_OBJECTS)
-	$(GPP) -o hans build/tun.o build/sha1.o build/main.o build/client.o build/server.o build/auth.o build/worker.o build/transport.o build/time.o build/tun_dev.o build/echo.o build/exception.o build/utility.o build/userspace.o $(LWIP_OBJECTS) $(LDFLAGS)
+hans: build/tun.o build/sha1.o build/main.o build/client.o build/server.o build/auth.o build/worker.o build/transport.o build/time.o build/tun_dev.o build/echo.o build/exception.o build/utility.o build/userspace.o build/kernel_echo_guard.o $(LWIP_OBJECTS)
+	$(GPP) -o hans build/tun.o build/sha1.o build/main.o build/client.o build/server.o build/auth.o build/worker.o build/transport.o build/time.o build/tun_dev.o build/echo.o build/exception.o build/utility.o build/userspace.o build/kernel_echo_guard.o $(LWIP_OBJECTS) $(LDFLAGS)
 
-test: build/transport_test build/userspace_test
+test: build/transport_test build/userspace_test build/kernel_echo_guard_test
 	./build/transport_test
 	./build/userspace_test
+	./build/kernel_echo_guard_test
 
 build/transport_test: directories tests/transport_test.cpp src/transport.cpp src/transport.h
 	$(GPP) tests/transport_test.cpp src/transport.cpp -o $@ -g -std=c++98 -pedantic -Wall -Wextra `sh osflags c $(MODE)`
 
 build/userspace_test: directories tests/userspace_test.cpp build/userspace.o build/utility.o build/exception.o build/time.o $(LWIP_OBJECTS)
 	$(GPP) tests/userspace_test.cpp build/userspace.o build/utility.o build/exception.o build/time.o $(LWIP_OBJECTS) -o $@ -g -std=c++98 -pedantic -Wall -Wextra $(LWIP_CFLAGS) `sh osflags c $(MODE)`
+
+build/kernel_echo_guard_test: directories tests/kernel_echo_guard_test.cpp build/kernel_echo_guard.o
+	$(GPP) tests/kernel_echo_guard_test.cpp build/kernel_echo_guard.o -o $@ -g -std=c++98 -pedantic -Wall -Wextra `sh osflags c $(MODE)`
 
 build/utility.o: src/utility.cpp src/utility.h src/exception.h src/config.h
 	$(GPP) -c src/utility.cpp -o $@ -o $@ $(CPPFLAGS)
@@ -60,6 +64,9 @@ build/client.o: src/client.cpp src/client.h src/server.h src/exception.h src/con
 
 build/server.o: src/server.cpp src/server.h src/client.h src/utility.h src/config.h src/worker.h src/auth.h src/transport.h src/time.h src/echo.h src/tun.h src/tun_dev.h
 	$(GPP) -c src/server.cpp -o $@ $(CPPFLAGS)
+
+build/kernel_echo_guard.o: src/kernel_echo_guard.cpp src/kernel_echo_guard.h
+	$(GPP) -c src/kernel_echo_guard.cpp -o $@ $(CPPFLAGS)
 
 build/auth.o: src/auth.cpp src/auth.h src/sha1.h src/utility.h
 	$(GPP) -c src/auth.cpp -o $@ $(CPPFLAGS)

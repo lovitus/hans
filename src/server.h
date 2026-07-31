@@ -24,6 +24,7 @@
 #include "auth.h"
 #include "config.h"
 #include "transport.h"
+#include "kernel_echo_guard.h"
 
 #include <map>
 #include <queue>
@@ -190,6 +191,7 @@ protected:
     ClientList clientList;
     ClientIpMap clientRealIpMap;
     ClientIpMap clientTunnelIpMap;
+    KernelEchoGuard kernelEchoGuard;
 };
 
 #endif

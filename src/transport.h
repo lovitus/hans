@@ -23,6 +23,9 @@ public:
         CAP_ADAPTIVE_CREDIT = 1,
         CAP_DIRECT_REPLY = 2,
         CAP_SEQUENCE_ACK = 4,
+        // Client-side platform hint. It is intentionally excluded from
+        // ALL_CAPABILITIES because it does not negotiate transport behavior.
+        CAP_WINDOWS_ICMP_HELPER = 8,
         ALL_CAPABILITIES = CAP_ADAPTIVE_CREDIT | CAP_DIRECT_REPLY |
                            CAP_SEQUENCE_ACK
     };

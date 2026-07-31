@@ -110,6 +110,8 @@ static void testWindowsCreditLifetime()
 {
     assert(WINDOWS_ICMP_REQUEST_TIMEOUT_MS > CREDIT_REFRESH_MS);
     assert(WINDOWS_ICMP_MAX_CREDITS * 2 <= WINDOWS_ICMP_MAX_PENDING);
+    assert((TransportV3::ALL_CAPABILITIES &
+            TransportV3::CAP_WINDOWS_ICMP_HELPER) == 0);
 }
 
 int main()

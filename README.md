@@ -265,16 +265,26 @@ permission error when neither a ping socket nor a raw socket is available.
 When a Windows userspace client connects to a Linux server, the Windows IP
 Helper API completes an echo operation on the first matching reply. The
 server kernel's ordinary ping reply can otherwise win the race against the
-Hans reply. In the server's network namespace, suppress ordinary kernel echo
-replies while serving these clients:
+Hans reply. A current client advertises its IP Helper path in the v3
+handshake. The Linux server then changes
+`/proc/sys/net/ipv4/icmp_echo_ignore_all` to `1` for the lifetime of the server
+process, and restores the value it observed when it exits normally. The
+setting is runtime-only but applies to the whole network namespace; Hans does
+not write `sysctl.conf` or any other persistent configuration.
+
+The first request can already have received the ordinary kernel reply, so the
+automatic handshake may take one retry. If the server lacks permission to
+open the runtime sysctl, Hans logs a warning. An administrator can apply the
+same non-persistent setting before starting the server:
 
 ```sh
 sudo sysctl -w net.ipv4.icmp_echo_ignore_all=1
 ```
 
-This disables normal ping replies from that Linux network namespace; restore
-the previous value when it is no longer needed. Hans deliberately does not
-change this host-wide setting automatically.
+This disables normal ping replies from that Linux network namespace. A server
+terminated with `SIGKILL`, or a process killed after the administrator changes
+the value again, cannot safely restore it automatically; inspect and restore
+the setting manually in those cases.
 
 Traffic between two tunnel clients is routed through the server's Hans
 interface. Linux servers therefore need IPv4 forwarding, and a restrictive

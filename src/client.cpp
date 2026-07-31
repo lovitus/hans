@@ -143,6 +143,10 @@ void Client::sendConnectionRequest()
         memcpy(connectData->v2.deviceId, deviceId.data(), DEVICE_ID_HEX_SIZE);
         connectData->capabilities = autoPoll ? TransportV3::ALL_CAPABILITIES :
                                               TransportV3::CAP_SEQUENCE_ACK;
+#ifdef WIN32
+        if (userspaceNetwork != NULL)
+            connectData->capabilities |= TransportV3::CAP_WINDOWS_ICMP_HELPER;
+#endif
         connectData->minimumPolls = 2;
         connectData->maximumPolls = 128;
         sendEchoToServer(TunnelHeader::TYPE_CONNECTION_REQUEST,
