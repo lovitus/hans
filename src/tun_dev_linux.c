@@ -144,6 +144,7 @@ static int open_veth(char *dev)
                private_name) < 0)
         return -1;
     if (run_ip("link", "set", "dev", public_name, "up", NULL, NULL, NULL) < 0 ||
+        run_ip("link", "set", "dev", public_name, "arp", "off", NULL, NULL) < 0 ||
         run_ip("link", "set", "dev", private_name, "up", NULL, NULL, NULL) < 0)
         goto failed;
 
