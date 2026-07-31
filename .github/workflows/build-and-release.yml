@@ -465,7 +465,8 @@ jobs:
             product="$GITHUB_WORKSPACE/dist/openbsd-${{ matrix.release }}-${{ matrix.arch }}"
             mkdir -p "$product"
             cp hans "$product/hans-openbsd-${{ matrix.release }}-${{ matrix.arch }}"
-            if ldd "$product/hans-openbsd-${{ matrix.release }}-${{ matrix.arch }}" >/tmp/hans-ldd.txt 2>&1; then
+            ldd "$product/hans-openbsd-${{ matrix.release }}-${{ matrix.arch }}" >/tmp/hans-ldd.txt 2>&1 || true
+            if grep -Eq '=>|/usr/lib/.*\.so' /tmp/hans-ldd.txt; then
               echo "OpenBSD package unexpectedly has dynamic dependencies:" >&2
               cat /tmp/hans-ldd.txt >&2
               exit 1
