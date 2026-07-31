@@ -253,6 +253,10 @@ jobs:
       - name: Test packaged executable from PowerShell
         shell: pwsh
         run: |
+          # The setup action adds Cygwin's bin directory to PATH. Remove it so
+          # this test proves that a plain Windows machine can run solely from
+          # the files bundled next to hans.exe.
+          $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
           $output = (& .\hans.exe 2>&1 | Out-String)
           if ($output -notmatch 'IP over ICMP version') {
             throw "Packaged hans.exe did not start from PowerShell. Output: $output"
