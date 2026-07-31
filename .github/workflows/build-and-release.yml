@@ -28,10 +28,13 @@ jobs:
         include:
           - os: ubuntu-22.04
             label: amd64-ubuntu22.04
+            runtime_image: ubuntu:22.04
           - os: ubuntu-24.04
             label: amd64-ubuntu24.04
+            runtime_image: ubuntu:24.04
           - os: ubuntu-24.04-arm
             label: arm64-ubuntu24.04
+            runtime_image: ubuntu:24.04
     steps:
       - uses: actions/checkout@v4
       - name: Install toolchain
@@ -39,15 +42,30 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq build-essential net-tools
       - name: Build
-        run: make
+        run: |
+          make LDFLAGS=-static
+          if readelf -d hans 2>/dev/null | grep -q NEEDED; then
+            echo "hans unexpectedly has dynamic dependencies" >&2
+            readelf -d hans >&2
+            exit 1
+          fi
       - name: Test (version, help, connection)
         run: |
           chmod +x scripts/test-hans.sh
           scripts/test-hans.sh ./hans "linux-${{ matrix.label }}"
+      - name: Test packaged binary without build dependencies
+        run: |
+          mkdir -p "dist/${{ matrix.label }}"
+          cp hans "dist/${{ matrix.label }}/hans"
+          docker run --rm \
+            -v "${{ github.workspace }}/dist/${{ matrix.label }}:/product:ro" \
+            -v "${{ github.workspace }}/scripts:/tests:ro" \
+            "${{ matrix.runtime_image }}" \
+            sh /tests/test-hans.sh /product/hans "linux-${{ matrix.label }}-packaged"
       - uses: actions/upload-artifact@v4
         with:
           name: hans-linux-${{ matrix.label }}
-          path: hans
+          path: dist/${{ matrix.label }}/hans
 
   # ---------------------------------------------------------------------
   # Emulated Linux CPU architectures via QEMU (docker buildx binfmt).
@@ -99,29 +117,36 @@ jobs:
               set -e
               apt-get update -qq
               apt-get install -y -qq build-essential
-              make
+              make LDFLAGS=-static
+              if readelf -d hans 2>/dev/null | grep -q NEEDED; then
+                echo "hans unexpectedly has dynamic dependencies" >&2
+                readelf -d hans >&2
+                exit 1
+              fi
               chmod +x scripts/test-hans.sh
               scripts/test-hans.sh ./hans "linux-${{ matrix.label }}"
-              cp hans "hans-linux-${{ matrix.label }}"
+              mkdir -p "dist/${{ matrix.label }}"
+              cp hans "dist/${{ matrix.label }}/hans-linux-${{ matrix.label }}"
             '
+      - name: Test packaged binary in a fresh container
+        run: |
+          docker run --rm --platform ${{ matrix.platform }} \
+            -v "${{ github.workspace }}/dist/${{ matrix.label }}:/product:ro" \
+            -v "${{ github.workspace }}/scripts:/tests:ro" \
+            ${{ matrix.image }} \
+            sh /tests/test-hans.sh "/product/hans-linux-${{ matrix.label }}" "linux-${{ matrix.label }}-packaged"
       - uses: actions/upload-artifact@v4
         with:
           name: hans-linux-${{ matrix.label }}
-          path: hans-linux-${{ matrix.label }}
+          path: dist/${{ matrix.label }}/hans-linux-${{ matrix.label }}
 
   # ---------------------------------------------------------------------
   # Linux static musl builds (Alpine + `-static`).
   #
-  # The glibc-linked binaries from build-linux-native/build-linux-emulated
-  # require GLIBC_2.34 (glibc 2.34, released 2021), because that's what the
-  # Ubuntu/Debian base images link against. They will refuse to run
-  # ("version GLIBC_2.34 not found") on older distros/kernels such as
-  # CentOS 7/8, RHEL 7/8, Debian 10, or Ubuntu 18.04/20.04, and on any
-  # embedded/router Linux that doesn't ship glibc at all.
-  #
-  # These musl builds are fully statically linked (musl supports static
-  # linking cleanly, unlike glibc's NSS-dependent dynamic linking), so they
-  # have *no* libc version dependency at all and run on essentially any
+  # All Linux release binaries are fully static. These musl variants avoid
+  # glibc-specific behavior as well as its NSS/static-linking caveats, so they
+  # are the preferred portable builds for old, embedded, and minimal systems.
+  # They have *no* libc version dependency and run on essentially any
   # Linux kernel new enough to support the syscalls hans uses - old
   # distros, musl-based distros (Alpine, postmarketOS, ...), and minimal/
   # embedded systems included.
@@ -166,14 +191,27 @@ jobs:
               set -e
               apk add --no-cache build-base linux-headers procps
               make LDFLAGS=-static
+              if readelf -d hans 2>/dev/null | grep -q NEEDED; then
+                echo "hans unexpectedly has dynamic dependencies" >&2
+                readelf -d hans >&2
+                exit 1
+              fi
               chmod +x scripts/test-hans.sh
               sh scripts/test-hans.sh ./hans "linux-${{ matrix.label }}"
-              cp hans "hans-linux-${{ matrix.label }}"
+              mkdir -p "dist/${{ matrix.label }}"
+              cp hans "dist/${{ matrix.label }}/hans-linux-${{ matrix.label }}"
             '
+      - name: Test packaged binary in a fresh Alpine container
+        run: |
+          docker run --rm --platform ${{ matrix.platform }} \
+            -v "${{ github.workspace }}/dist/${{ matrix.label }}:/product:ro" \
+            -v "${{ github.workspace }}/scripts:/tests:ro" \
+            alpine:3.20 \
+            sh /tests/test-hans.sh "/product/hans-linux-${{ matrix.label }}" "linux-${{ matrix.label }}-packaged"
       - uses: actions/upload-artifact@v4
         with:
           name: hans-linux-${{ matrix.label }}
-          path: hans-linux-${{ matrix.label }}
+          path: dist/${{ matrix.label }}/hans-linux-${{ matrix.label }}
 
   # ---------------------------------------------------------------------
   # macOS: Intel (x86_64) and Apple Silicon (arm64).
@@ -197,13 +235,30 @@ jobs:
         run: |
           chmod +x scripts/test-hans.sh
           scripts/test-hans.sh ./hans "macos-${{ matrix.label }}"
+      - name: Test packaged binary with a minimal environment
+        run: |
+          mkdir -p "dist/${{ matrix.label }}"
+          cp hans "dist/${{ matrix.label }}/hans"
+          unexpected="$({ otool -L "dist/${{ matrix.label }}/hans" | tail -n +2 || true; } |
+            awk '{ print $1 }' |
+            grep -Ev '^(/usr/lib/|/System/Library/)' || true)"
+          if [ -n "$unexpected" ]; then
+            echo "Unexpected non-system macOS dependencies:" >&2
+            printf '%s\n' "$unexpected" >&2
+            exit 1
+          fi
+          env -i \
+            PATH=/usr/bin:/bin:/usr/sbin:/sbin \
+            HOME="$RUNNER_TEMP" \
+            TMPDIR="$RUNNER_TEMP" \
+            sh scripts/test-hans.sh "$(pwd)/dist/${{ matrix.label }}/hans" "macos-${{ matrix.label }}-packaged"
       - uses: actions/upload-artifact@v4
         with:
           name: hans-macos-${{ matrix.label }}
-          path: hans
+          path: dist/${{ matrix.label }}/hans
 
   # ---------------------------------------------------------------------
-  # Windows via Cygwin (amd64 only).
+  # Windows via Cygwin (amd64 + legacy i386).
   #
   # NOTE on arm64: Cygwin has never shipped an arm64/aarch64 port (it only
   # builds for x86_64 and, historically, x86). There is therefore no Cygwin
@@ -213,79 +268,103 @@ jobs:
   # such as syslog()/daemon()/getaddrinfo() it relies on). Out of scope here.
   # ---------------------------------------------------------------------
   build-windows:
-    name: Windows amd64 (cygwin)
+    name: Windows ${{ matrix.arch }} (cygwin)
     runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            cygwin_root: C:\tools\cygwin
+            maintained: true
+          # Cygwin 3.3.6 is the final x86 release. Build against Cygwin's
+          # official frozen 2022 archive and run it under WOW64.
+          - arch: i386
+            cygwin_root: C:\tools\cygwin32
+            maintained: false
     steps:
       - uses: actions/checkout@v4
-      - name: Install Cygwin toolchain
+      - name: Install maintained Cygwin toolchain
+        if: matrix.maintained
         uses: egor-tensin/setup-cygwin@v4
         with:
           packages: gcc-g++ make
-      - name: Build
-        shell: C:\tools\cygwin\bin\bash.exe --login -eo pipefail -o igncr '{0}'
+          install-dir: ${{ matrix.cygwin_root }}
+      - name: Install archived 32-bit Cygwin toolchain
+        if: ${{ !matrix.maintained }}
+        shell: pwsh
         run: |
-          cd "$(cygpath -u '${{ github.workspace }}')"
-          make CPPFLAGS='-c -g -std=gnu++98 -fpermissive -Wall -Wextra -Wno-sign-compare -Wno-missing-field-initializers -DWIN32'
-          if [ -f hans.exe ] && [ ! -f hans ]; then cp hans.exe hans; fi
-      - name: Test (version, help, connection)
-        shell: C:\tools\cygwin\bin\bash.exe --login -eo pipefail -o igncr '{0}'
+          $setup = Join-Path $env:RUNNER_TEMP 'setup-x86.exe'
+          Invoke-WebRequest 'https://cygwin.com/setup-x86.exe' -OutFile $setup
+          & $setup `
+            --quiet-mode `
+            --wait `
+            --no-desktop `
+            --no-shortcuts `
+            --no-startmenu `
+            --allow-unsupported-windows `
+            --root '${{ matrix.cygwin_root }}' `
+            --site 'https://mirrors.kernel.org/sourceware/cygwin-archive/20221123/' `
+            --packages 'gcc-g++,make'
+          if ($LASTEXITCODE -ne 0) {
+            throw "32-bit Cygwin setup failed with exit code $LASTEXITCODE"
+          }
+      - name: Build, test, and verify static runtime linkage
+        shell: pwsh
         run: |
-          cd "$(cygpath -u '${{ github.workspace }}')"
-          chmod +x scripts/test-hans.sh
-          BIN=hans
-          [ -f hans.exe ] && BIN=hans.exe
-          ./scripts/test-hans.sh "./$BIN" "windows-amd64-cygwin"
-      - name: Bundle Cygwin runtime DLLs
-        shell: C:\tools\cygwin\bin\bash.exe --login -eo pipefail -o igncr '{0}'
-        run: |
-          # Collect the complete transitive closure of Cygwin DLL imports.
-          # hans.exe directly needs cygwin, libgcc, and libstdc++; those DLLs
-          # may import additional Cygwin DLLs of their own.
-          cd "$(cygpath -u '${{ github.workspace }}')"
-          touch .cyg-dlls-seen
-          echo hans.exe > .cyg-dlls-pending
-          while [ -s .cyg-dlls-pending ]; do
-            binary="$(head -n 1 .cyg-dlls-pending)"
-            tail -n +2 .cyg-dlls-pending > .cyg-dlls-next
-            mv .cyg-dlls-next .cyg-dlls-pending
-
-            objdump -p "$binary" |
-              awk '/DLL Name: cyg/ { print $3 }' |
-              while IFS= read -r dll; do
-                if grep -Fxq "$dll" .cyg-dlls-seen; then
-                  continue
-                fi
-                source="$(cygpath -u "C:\\tools\\cygwin\\bin\\$dll")"
-                test -f "$source"
-                cp "$source" .
-                echo "$dll" >> .cyg-dlls-seen
-                echo "$dll" >> .cyg-dlls-pending
-              done
-          done
-          unlink .cyg-dlls-seen
-          unlink .cyg-dlls-pending
-          ls -la cyg*.dll
+          $bash = Join-Path '${{ matrix.cygwin_root }}' 'bin\bash.exe'
+          $cygpath = Join-Path '${{ matrix.cygwin_root }}' 'bin\cygpath.exe'
+          $script = (& $cygpath -u (Join-Path $env:GITHUB_WORKSPACE 'scripts\build-windows-cygwin.sh') | Out-String).Trim()
+          & $bash --login -eo pipefail -o igncr `
+            $script `
+            '${{ matrix.arch }}'
+          if ($LASTEXITCODE -ne 0) {
+            throw "Windows ${{ matrix.arch }} build failed with exit code $LASTEXITCODE"
+          }
       - name: Test packaged executable from PowerShell
         shell: pwsh
         run: |
-          # The setup action adds Cygwin's bin directory to PATH. Remove it so
-          # this test proves that a plain Windows machine can run solely from
-          # the files bundled next to hans.exe.
+          $product = Join-Path $env:GITHUB_WORKSPACE 'dist\windows-${{ matrix.arch }}'
+          $state = Join-Path $env:RUNNER_TEMP 'hans-packaged-state-${{ matrix.arch }}'
+          New-Item -ItemType Directory -Force $state | Out-Null
+
+          # Resolve the test state path before deleting Cygwin. Then remove the
+          # complete compiler/runtime environment, not merely its PATH entry.
+          $cygpath = Join-Path '${{ matrix.cygwin_root }}' 'bin\cygpath.exe'
+          $statePosix = (& $cygpath -u $state | Out-String).Trim()
+          Remove-Item -LiteralPath '${{ matrix.cygwin_root }}' -Recurse -Force
           $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
-          $output = (& .\hans.exe 2>&1 | Out-String)
+          $env:HANS_STATE_DIR = $statePosix
+
+          $exe = Join-Path $product 'hans.exe'
+          $output = (& $exe 2>&1 | Out-String)
           $exitCode = $LASTEXITCODE
           if ($output -notmatch 'IP over ICMP version') {
-            $files = (Get-ChildItem .\hans.exe, .\cyg*.dll | Select-Object -ExpandProperty Name) -join ', '
+            $files = (Get-ChildItem $product | Select-Object -ExpandProperty Name) -join ', '
             throw "Packaged hans.exe did not start from PowerShell (exit $exitCode; files: $files). Output: $output"
+          }
+
+          $id1 = (& $exe --show-device-id | Out-String).Trim()
+          $id2 = (& $exe --show-device-id | Out-String).Trim()
+          if ($id1 -notmatch '^[0-9a-f]{32}$' -or $id1 -ne $id2) {
+            throw "Packaged hans.exe failed persistent device ID test: '$id1' / '$id2'"
+          }
+
+          $leaseWindows = Join-Path $state 'leases'
+          "$id1 167772260 1785484800 1 3405803796" | Set-Content -Encoding ascii $leaseWindows
+          $leasePosix = "$statePosix/leases"
+          $peers = (& $exe --list-peers --lease-file $leasePosix | Out-String)
+          if ($peers -notmatch [regex]::Escape($id1) -or $peers -notmatch '10\.0\.0\.100' -or $peers -notmatch 'online') {
+            throw "Packaged hans.exe failed peer-list test: $peers"
           }
           # No arguments intentionally prints usage and exits non-zero.
           exit 0
       - uses: actions/upload-artifact@v4
         with:
-          name: hans-windows-amd64-cygwin
+          name: hans-windows-${{ matrix.arch }}-cygwin
           path: |
-            hans.exe
-            cyg*.dll
+            dist/windows-${{ matrix.arch }}/hans.exe
+            dist/windows-${{ matrix.arch }}/cygwin1.dll
 
   # ---------------------------------------------------------------------
   # FreeBSD: amd64, aarch64, riscv64, powerpc64 across kernel releases.
@@ -326,14 +405,21 @@ jobs:
             true
           run: |
             cd $GITHUB_WORKSPACE
-            make GCC=cc GPP=c++
+            make GCC=cc GPP=c++ LDFLAGS=-static
             chmod +x scripts/test-hans.sh
             sh scripts/test-hans.sh ./hans "freebsd-${{ matrix.release }}-${{ matrix.arch }}"
-            cp hans "hans-freebsd-${{ matrix.release }}-${{ matrix.arch }}"
+            product="$GITHUB_WORKSPACE/dist/freebsd-${{ matrix.release }}-${{ matrix.arch }}"
+            mkdir -p "$product"
+            cp hans "$product/hans-freebsd-${{ matrix.release }}-${{ matrix.arch }}"
+            file "$product/hans-freebsd-${{ matrix.release }}-${{ matrix.arch }}" | grep -qi 'statically linked'
+            env -i PATH=/bin:/usr/bin:/sbin:/usr/sbin HOME=/tmp TMPDIR=/tmp \
+              sh "$GITHUB_WORKSPACE/scripts/test-hans.sh" \
+              "$product/hans-freebsd-${{ matrix.release }}-${{ matrix.arch }}" \
+              "freebsd-${{ matrix.release }}-${{ matrix.arch }}-packaged"
       - uses: actions/upload-artifact@v4
         with:
           name: hans-freebsd-${{ matrix.release }}-${{ matrix.arch }}
-          path: hans-freebsd-${{ matrix.release }}-${{ matrix.arch }}
+          path: dist/freebsd-${{ matrix.release }}-${{ matrix.arch }}/hans-freebsd-${{ matrix.release }}-${{ matrix.arch }}
 
   # ---------------------------------------------------------------------
   # OpenBSD: amd64, aarch64, riscv64 across kernel releases.
@@ -370,14 +456,21 @@ jobs:
             true
           run: |
             cd $GITHUB_WORKSPACE
-            make GCC=cc GPP=c++
+            make GCC=cc GPP=c++ LDFLAGS=-static
             chmod +x scripts/test-hans.sh
             sh scripts/test-hans.sh ./hans "openbsd-${{ matrix.release }}-${{ matrix.arch }}"
-            cp hans "hans-openbsd-${{ matrix.release }}-${{ matrix.arch }}"
+            product="$GITHUB_WORKSPACE/dist/openbsd-${{ matrix.release }}-${{ matrix.arch }}"
+            mkdir -p "$product"
+            cp hans "$product/hans-openbsd-${{ matrix.release }}-${{ matrix.arch }}"
+            file "$product/hans-openbsd-${{ matrix.release }}-${{ matrix.arch }}" | grep -qi 'statically linked'
+            env -i PATH=/bin:/usr/bin:/sbin:/usr/sbin HOME=/tmp TMPDIR=/tmp \
+              sh "$GITHUB_WORKSPACE/scripts/test-hans.sh" \
+              "$product/hans-openbsd-${{ matrix.release }}-${{ matrix.arch }}" \
+              "openbsd-${{ matrix.release }}-${{ matrix.arch }}-packaged"
       - uses: actions/upload-artifact@v4
         with:
           name: hans-openbsd-${{ matrix.release }}-${{ matrix.arch }}
-          path: hans-openbsd-${{ matrix.release }}-${{ matrix.arch }}
+          path: dist/openbsd-${{ matrix.release }}-${{ matrix.arch }}/hans-openbsd-${{ matrix.release }}-${{ matrix.arch }}
 
   # ---------------------------------------------------------------------
   # NetBSD: amd64, aarch64, riscv64 across kernel releases.
@@ -417,14 +510,21 @@ jobs:
             true
           run: |
             cd $GITHUB_WORKSPACE
-            make GCC=cc GPP=c++
+            make GCC=cc GPP=c++ LDFLAGS=-static
             chmod +x scripts/test-hans.sh
             sh scripts/test-hans.sh ./hans "netbsd-${{ matrix.release }}-${{ matrix.arch }}"
-            cp hans "hans-netbsd-${{ matrix.release }}-${{ matrix.arch }}"
+            product="$GITHUB_WORKSPACE/dist/netbsd-${{ matrix.release }}-${{ matrix.arch }}"
+            mkdir -p "$product"
+            cp hans "$product/hans-netbsd-${{ matrix.release }}-${{ matrix.arch }}"
+            file "$product/hans-netbsd-${{ matrix.release }}-${{ matrix.arch }}" | grep -qi 'statically linked'
+            env -i PATH=/bin:/usr/bin:/sbin:/usr/sbin HOME=/tmp TMPDIR=/tmp \
+              sh "$GITHUB_WORKSPACE/scripts/test-hans.sh" \
+              "$product/hans-netbsd-${{ matrix.release }}-${{ matrix.arch }}" \
+              "netbsd-${{ matrix.release }}-${{ matrix.arch }}-packaged"
       - uses: actions/upload-artifact@v4
         with:
           name: hans-netbsd-${{ matrix.release }}-${{ matrix.arch }}
-          path: hans-netbsd-${{ matrix.release }}-${{ matrix.arch }}
+          path: dist/netbsd-${{ matrix.release }}-${{ matrix.arch }}/hans-netbsd-${{ matrix.release }}-${{ matrix.arch }}
 
   # ---------------------------------------------------------------------
   # Automatically publish a GitHub Release with every built binary.
@@ -451,14 +551,14 @@ jobs:
           mkdir -p release
           for d in artifacts/*/; do
             name="$(basename "$d")"
-            if [ "$name" = "hans-windows-amd64-cygwin" ]; then
+            if [[ "$name" == hans-windows-*-cygwin ]]; then
               # Keep the executable and its runtime dependency under the exact
               # filenames required by the Windows loader. Publishing them as
               # separately prefixed release assets breaks Cygwin startup
               # because the loader looks specifically for "cygwin1.dll".
               (
                 cd "$d"
-                zip -q "$GITHUB_WORKSPACE/release/$name.zip" hans.exe cyg*.dll
+                zip -q "$GITHUB_WORKSPACE/release/$name.zip" hans.exe cygwin1.dll
               )
               continue
             fi

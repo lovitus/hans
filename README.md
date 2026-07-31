@@ -19,10 +19,11 @@ deployment, compatibility, and peer-management features:
 | Lease retention | Offline leases are retained while unused addresses remain. When the pool is full, only the least-recently-seen offline lease is reclaimed; active peers are never evicted. |
 | Peer inspection | `hans --list-peers` shows device ID, tunnel IP, real IP, online/offline state, and last-seen time. `hans --show-device-id` displays the local persistent identity. |
 | Backward-compatible protocol | New servers still accept legacy clients. New clients try the device-identity protocol first and automatically fall back when connecting to an older server. |
-| Broad release matrix | GitHub Actions builds Linux, macOS, Windows/Cygwin, FreeBSD, OpenBSD, and NetBSD binaries for the CPU architectures supported by the codebase. |
+| Broad release matrix | GitHub Actions builds Linux, macOS, Windows/Cygwin (amd64 and legacy i386), FreeBSD, OpenBSD, and NetBSD binaries for the CPU architectures supported by the codebase. |
+| Static releases | Linux and BSD release binaries are fully static. Windows compiler/C++ runtimes are embedded in the executable; macOS uses only operating-system libraries. |
 | Old-Linux support | Statically linked musl binaries avoid glibc version dependencies and run on systems such as CentOS 7, older distributions, embedded Linux, and Alpine. |
-| Runtime packaging | The Windows release includes the required `cygwin1.dll`, allowing the published executable to run without a separate Cygwin installation. |
-| Automated validation | Every build checks version/help output and persistent identity/lease commands. Environments with root and TUN support additionally attempt a real client/server tunnel connection. |
+| Runtime packaging | Windows compiler and C++ runtimes are linked into `hans.exe`; only the unavoidable `cygwin1.dll` is bundled, allowing use without a separate Cygwin installation. |
+| Automated validation | Every build checks version/help output and persistent identity/lease commands, then repeats those checks from an isolated product directory without the compiler or development environment. Environments with root and TUN support additionally attempt a real client/server tunnel connection. |
 | Continuous releases | Successful builds are collected and published automatically on the [Releases page](../../releases). |
 
 ## How it works
@@ -48,19 +49,20 @@ deployment, compatibility, and peer-management features:
 ## Downloads
 
 Prebuilt binaries for Linux (amd64/arm64/armv7/i386/ppc64le/riscv64/s390x/
-mips64le), macOS (amd64/arm64), Windows (amd64, via Cygwin), FreeBSD, OpenBSD
+mips64le), macOS (amd64/arm64), Windows (amd64/i386, via Cygwin), FreeBSD, OpenBSD
 and NetBSD (amd64/aarch64/riscv64/powerpc64, several releases each) are
 published automatically on the [Releases page](../../releases). Windows users
-should download `hans-windows-amd64-cygwin.zip` and extract `hans.exe` together
-with all bundled `cyg*.dll` files into the same directory. The DLLs must keep
-their exact filenames; otherwise Windows cannot start the executable.
+should download `hans-windows-amd64-cygwin.zip` on normal 64-bit systems, or
+the legacy `hans-windows-i386-cygwin.zip` when 32-bit support is required.
+Extract `hans.exe` and `cygwin1.dll` into the same directory; the DLL must keep
+its exact filename. Cygwin ended x86 maintenance at version 3.3.6, so amd64 is
+recommended whenever the operating system supports it.
 
 **Linux: which binary should I use?**
 
-- `hans-linux-<arch>-ubuntuXX.XX` — dynamically linked against glibc.
-  Requires **glibc >= 2.34** (glibc 2.34, 2021) on the target machine. It
-  will fail with `version 'GLIBC_2.34' not found` on older distros/kernels
-  such as CentOS 7/8, RHEL 7/8, Debian 10, or Ubuntu 18.04/20.04.
+- `hans-linux-<arch>-ubuntuXX.XX` — fully static glibc build produced and
+  tested on the named Ubuntu toolchain. It does not require a target-system
+  copy of glibc or libstdc++.
 - `hans-linux-<arch>-musl` — **statically linked against musl libc**, with
   no libc version dependency at all. Use this one if you're targeting an
   old kernel/distro, a musl-based system (Alpine, postmarketOS, ...), an
