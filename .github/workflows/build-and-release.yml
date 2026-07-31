@@ -150,7 +150,7 @@ jobs:
             bash -c '
               set -eu
               apt-get update -qq
-              DEBIAN_FRONTEND=noninteractive apt-get install -y -qq iproute2 iperf3
+              DEBIAN_FRONTEND=noninteractive apt-get install -y -qq iproute2 iperf3 net-tools
               mkdir -p /dev/net
               if [ ! -c /dev/net/tun ]; then
                 mknod /dev/net/tun c 10 200
