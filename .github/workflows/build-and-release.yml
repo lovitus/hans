@@ -73,7 +73,7 @@ jobs:
             label: arm64-qemu
             experimental: false
           - platform: linux/mips64le
-            image: ubuntu:24.04
+            image: debian:bookworm
             label: mips64le
             experimental: true
           - platform: linux/ppc64le
