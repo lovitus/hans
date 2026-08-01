@@ -36,6 +36,9 @@ trap diagnostics EXIT INT TERM
 
 mkdir -p "$work/client-state" "$work/server-state"
 chmod 777 "$work/client-state"
+printf '%s\n' 'userspace-secret' >"$work/socks-password"
+chmod 600 "$work/socks-password"
+chown 65534:65534 "$work/socks-password"
 
 ip netns add "$server_ns"
 ip netns add "$client_ns"
@@ -88,6 +91,7 @@ ip netns exec "$client_ns" setpriv --reuid 65534 --regid 65534 --clear-groups \
     env HANS_STATE_DIR="$work/client-state" "$BINABS" \
     -c 192.0.2.1 -p hans-userspace-ci -f -v \
     --feature userspace --socks5 127.0.0.1:18080 \
+    --socks5-user hans --socks5-password-file "$work/socks-password" \
     --shareports 18081,18082=127.0.0.1:18081 >"$client_log" 2>&1 &
 client_pid=$!
 
@@ -111,6 +115,7 @@ grep -q "using unprivileged ICMP ping socket" "$client_log"
 
 ip netns exec "$client_ns" curl --fail --silent --show-error --max-time 20 \
     --socks5-hostname 127.0.0.1:18080 \
+    --proxy-user hans:userspace-secret \
     http://10.77.88.1:18080/$(basename "$BINABS") -o "$work/socks-download"
 cmp "$BINABS" "$work/socks-download"
 
@@ -122,12 +127,13 @@ ip netns exec "$server_ns" curl --fail --silent --show-error --max-time 20 \
 cmp "$BINABS" "$work/share-explicit-download"
 
 ip netns exec "$client_ns" python3 "$(dirname "$BINABS")/test-socks5-udp.py" \
-    127.0.0.1 18080 10.77.88.1 18083
+    127.0.0.1 18080 10.77.88.1 18083 hans userspace-secret
 
 # Exercise multiple simultaneous TCP PCBs and bridge buffers.
 for n in 1 2 3 4; do
     ip netns exec "$client_ns" curl --fail --silent --show-error --max-time 20 \
         --socks5 127.0.0.1:18080 \
+        --proxy-user hans:userspace-secret \
         http://10.77.88.1:18080/$(basename "$BINABS") -o "$work/concurrent-$n" &
     eval "curl_pid_$n=$!"
 done

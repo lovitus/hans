@@ -64,7 +64,9 @@ Client::Client(int tunnelMtu, const string *deviceName, uint32_t serverIp,
                const string &deviceId, bool userspace,
                const string &socksAddress,
                const vector<SharePort> &sharePorts,
-               const string &identityFile)
+               const string &identityFile, bool requireV4,
+               const string &serverFingerprint, const string &socksUser,
+               const string &socksPassword)
     : Worker(tunnelMtu, deviceName, false, uid, gid, !userspace, userspace),
       auth(passphrase)
 {
@@ -80,6 +82,8 @@ Client::Client(int tunnelMtu, const string *deviceName, uint32_t serverIp,
     this->deviceId = deviceId;
     this->protocolVersion = 4;
     this->protocolRequestAttempts = 0;
+    this->requireV4 = requireV4;
+    this->expectedServerFingerprint = serverFingerprint;
     this->negotiatedCapabilities = 0;
     this->sessionId = 0;
     this->localReceiverIndex = 0;
@@ -95,7 +99,8 @@ Client::Client(int tunnelMtu, const string *deviceName, uint32_t serverIp,
     this->directProbePending = false;
     this->directProbeReplies = 0;
     this->userspaceNetwork = userspace ?
-        new UserspaceNetwork(this, tunnelMtu, socksAddress, sharePorts) : NULL;
+        new UserspaceNetwork(this, tunnelMtu, socksAddress, sharePorts,
+                             socksUser, socksPassword) : NULL;
 #ifdef WIN32
     if (userspace)
     {
@@ -120,6 +125,8 @@ void Client::sendConnectionRequest()
 {
     if (protocolRequestAttempts >= 2 && protocolVersion > 1)
     {
+        if (protocolVersion == 4 && requireV4)
+            throw Exception("secure protocol v4 handshake timed out; refusing downgrade");
         protocolVersion--;
         protocolRequestAttempts = 0;
         syslog(LOG_WARNING, "server did not answer protocol v%d handshake; falling back to v%d",
@@ -265,6 +272,13 @@ bool Client::handleEchoData(const TunnelHeader &header, int dataLength,
             !secureHandshake->readMessage2(
                 (const uint8_t *)echoReceivePayloadBuffer() + 8, 96))
             throw Exception("invalid secure handshake response");
+        const string serverFingerprint = SecureIdentity::fingerprint(
+            secureHandshake->remoteStaticKey());
+        if (!expectedServerFingerprint.empty() &&
+            serverFingerprint != expectedServerFingerprint)
+            throw Exception("secure server fingerprint mismatch");
+        syslog(LOG_INFO, "secure server fingerprint %s",
+               serverFingerprint.c_str());
         protocolRequestAttempts = 0;
         sendV4HandshakeFinish();
         return true;
@@ -515,6 +529,12 @@ void Client::sendV3ToServer(Worker::TunnelHeader::Type type, int dataLength,
 
 bool Client::openV4Packet(const TunnelHeader &header, int &dataLength)
 {
+    // Multiple local processes (and multiple peers behind one NAT) can see
+    // the same raw ICMP replies. Receiver indexes provide cheap demux before
+    // AEAD; only a packet addressed to this session merits an auth warning.
+    if (dataLength < 4 || get32(echoReceivePayloadBuffer()) !=
+                          localReceiverIndex)
+        return false;
     std::vector<uint8_t> plain;
     if (!secureTransport.open((const uint8_t *)&header, sizeof(header),
                               (const uint8_t *)echoReceivePayloadBuffer(),

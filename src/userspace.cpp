@@ -115,6 +115,7 @@ public:
     enum SocksState
     {
         SOCKS_GREETING,
+        SOCKS_AUTH,
         SOCKS_REQUEST,
         SOCKS_CONNECTING,
         SOCKS_STREAM,
@@ -164,9 +165,11 @@ public:
     };
 
     Impl(UserspaceNetworkObserver *observer, int mtu,
-         const string &socksAddress, const vector<SharePort> &sharePorts)
+         const string &socksAddress, const vector<SharePort> &sharePorts,
+         const string &socksUser, const string &socksPassword)
         : observer(observer), mtu(mtu), socksAddress(socksAddress),
-          sharePorts(sharePorts), socksFd(-1), configured(false)
+          sharePorts(sharePorts), socksUser(socksUser),
+          socksPassword(socksPassword), socksFd(-1), configured(false)
     {
         memset(&interface, 0, sizeof(interface));
         lwip_init();
@@ -276,8 +279,8 @@ public:
             listen(socksFd, 64) != 0)
             throw Exception("binding SOCKS5 listener", true);
 
-        if ((ip & 0xff000000u) != 0x7f000000u)
-            syslog(LOG_WARNING, "SOCKS5 is listening on a non-loopback address; no authentication is enabled");
+        if ((ip & 0xff000000u) != 0x7f000000u && socksUser.empty())
+            syslog(LOG_WARNING, "SOCKS5 is listening on a non-loopback address without authentication");
         syslog(LOG_INFO, "SOCKS5 listening on %s", socksAddress.c_str());
     }
 
@@ -605,15 +608,71 @@ public:
                 size_t count = (uint8_t)connection->controlIn[1];
                 if (connection->controlIn.size() < count + 2)
                     return;
-                bool noAuth = false;
+                bool acceptedMethod = false;
+                const uint8_t wantedMethod = socksUser.empty() ? 0 : 2;
                 for (size_t i = 0; i < count; ++i)
-                    if ((uint8_t)connection->controlIn[i + 2] == 0)
-                        noAuth = true;
-                const uint8_t reply[2] = {5, noAuth ? (uint8_t)0 : (uint8_t)0xff};
+                    if ((uint8_t)connection->controlIn[i + 2] == wantedMethod)
+                        acceptedMethod = true;
+                const uint8_t reply[2] = {5, acceptedMethod ? wantedMethod :
+                                                             (uint8_t)0xff};
                 appendBytes(connection->controlOut, reply, sizeof(reply));
                 connection->controlIn.erase(connection->controlIn.begin(),
                                             connection->controlIn.begin() + count + 2);
-                if (!noAuth)
+                if (!acceptedMethod)
+                {
+                    connection->closeAfterWrite = true;
+                    return;
+                }
+                connection->socksState = socksUser.empty() ? SOCKS_REQUEST :
+                                                             SOCKS_AUTH;
+            }
+            else if (connection->socksState == SOCKS_AUTH)
+            {
+                if (connection->controlIn.size() < 2)
+                    return;
+                const size_t userLength = (uint8_t)connection->controlIn[1];
+                if ((uint8_t)connection->controlIn[0] != 1 || userLength == 0)
+                {
+                    const uint8_t reply[2] = {1, 1};
+                    appendBytes(connection->controlOut, reply, sizeof(reply));
+                    connection->closeAfterWrite = true;
+                    return;
+                }
+                if (connection->controlIn.size() < 2 + userLength + 1)
+                    return;
+                const size_t passwordLength =
+                    (uint8_t)connection->controlIn[2 + userLength];
+                const size_t authLength = 3 + userLength + passwordLength;
+                if (connection->controlIn.size() < authLength)
+                    return;
+                unsigned int difference =
+                    (unsigned int)(userLength ^ socksUser.size()) |
+                    (unsigned int)(passwordLength ^ socksPassword.size());
+                const size_t maxUser = std::max(userLength, socksUser.size());
+                const size_t maxPassword = std::max(passwordLength,
+                                                    socksPassword.size());
+                for (size_t i = 0; i < maxUser; ++i)
+                {
+                    const uint8_t supplied = i < userLength ?
+                        (uint8_t)connection->controlIn[2 + i] : 0;
+                    const uint8_t expected = i < socksUser.size() ?
+                        (uint8_t)socksUser[i] : 0;
+                    difference |= supplied ^ expected;
+                }
+                for (size_t i = 0; i < maxPassword; ++i)
+                {
+                    const uint8_t supplied = i < passwordLength ?
+                        (uint8_t)connection->controlIn[3 + userLength + i] : 0;
+                    const uint8_t expected = i < socksPassword.size() ?
+                        (uint8_t)socksPassword[i] : 0;
+                    difference |= supplied ^ expected;
+                }
+                const uint8_t reply[2] = {1, difference == 0 ? (uint8_t)0 :
+                                                               (uint8_t)1};
+                appendBytes(connection->controlOut, reply, sizeof(reply));
+                connection->controlIn.erase(connection->controlIn.begin(),
+                                            connection->controlIn.begin() + authLength);
+                if (difference != 0)
                 {
                     connection->closeAfterWrite = true;
                     return;
@@ -1067,6 +1126,8 @@ public:
     int mtu;
     string socksAddress;
     vector<SharePort> sharePorts;
+    string socksUser;
+    string socksPassword;
     int socksFd;
     uint32_t socksBindIp;
     bool configured;
@@ -1077,8 +1138,11 @@ public:
 
 UserspaceNetwork::UserspaceNetwork(UserspaceNetworkObserver *observer, int mtu,
                                    const string &socksAddress,
-                                   const vector<SharePort> &sharePorts)
-    : impl(new Impl(observer, mtu, socksAddress, sharePorts))
+                                   const vector<SharePort> &sharePorts,
+                                   const string &socksUser,
+                                   const string &socksPassword)
+    : impl(new Impl(observer, mtu, socksAddress, sharePorts,
+                    socksUser, socksPassword))
 {
 }
 

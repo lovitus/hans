@@ -520,11 +520,27 @@ bool Server::handleEchoData(const TunnelHeader &header, int dataLength, uint32_t
                     echoSendPayloadBuffer()[0] = client->transportMode;
                     sendV3ToClient(client, TunnelHeader::TYPE_MODE_ACK, 1,
                                    TransportV3::FLAG_CONTROL, true, id, seq);
+                    syslog(LOG_INFO, "client %s transport mode is now %s",
+                           Utility::formatIp(realIp).c_str(),
+                           client->transportMode == TransportV3::MODE_DIRECT ?
+                           "direct" : "adaptive-credit");
                 }
                 return true;
             case TunnelHeader::TYPE_TRANSPORT_PING:
-                sendV3ToClient(client, TunnelHeader::TYPE_TRANSPORT_PING, 0,
-                               TransportV3::FLAG_CONTROL, true, id, seq);
+                if (client->transportMode == TransportV3::MODE_DIRECT &&
+                    directPathFailed(client))
+                {
+                    client->transportMode = TransportV3::MODE_CREDIT;
+                    client->directUnacked.clear();
+                    syslog(LOG_WARNING, "direct reply acknowledgements stalled for %s; falling back to adaptive credits",
+                           Utility::formatIp(realIp).c_str());
+                    echoSendPayloadBuffer()[0] = TransportV3::MODE_CREDIT;
+                    sendV3ToClient(client, TunnelHeader::TYPE_MODE_ACK, 1,
+                                   TransportV3::FLAG_CONTROL, true, id, seq);
+                }
+                else
+                    sendV3ToClient(client, TunnelHeader::TYPE_TRANSPORT_PING, 0,
+                                   TransportV3::FLAG_CONTROL, true, id, seq);
                 return true;
             default:
                 return true;
@@ -1202,7 +1218,7 @@ void Server::saveLeases()
     fsync(leaseFd);
 }
 
-int Server::listPeers(const string &leaseFile)
+int Server::listPeers(const string &leaseFile, bool json)
 {
     std::ifstream input(leaseFile.c_str());
     if (!input)
@@ -1211,17 +1227,21 @@ int Server::listPeers(const string &leaseFile)
         return 1;
     }
 
-    cout << std::left << std::setw(34) << "DEVICE ID"
-         << std::setw(17) << "TUNNEL IP"
-         << std::setw(17) << "REAL IP"
-         << std::setw(10) << "STATE"
-         << "LAST SEEN" << endl;
+    if (json)
+        cout << "[";
+    else
+        cout << std::left << std::setw(34) << "DEVICE ID"
+             << std::setw(17) << "TUNNEL IP"
+             << std::setw(17) << "REAL IP"
+             << std::setw(10) << "STATE"
+             << "LAST SEEN" << endl;
 
     string deviceId;
     uint32_t tunnelIp;
     long lastSeen;
     int active;
     uint32_t realIp;
+    bool first = true;
     while (input >> deviceId >> tunnelIp >> lastSeen >> active >> realIp)
     {
         char formattedTime[32] = "-";
@@ -1230,12 +1250,25 @@ int Server::listPeers(const string &leaseFile)
         if (local != NULL)
             strftime(formattedTime, sizeof(formattedTime), "%Y-%m-%d %H:%M:%S", local);
 
-        cout << std::left << std::setw(34) << deviceId
-             << std::setw(17) << Utility::formatIp(tunnelIp)
-             << std::setw(17) << Utility::formatIp(realIp)
-             << std::setw(10) << (active ? "online" : "offline")
-             << formattedTime << endl;
+        if (json)
+        {
+            if (!first) cout << ',';
+            cout << "{\"device_id\":\"" << deviceId
+                 << "\",\"tunnel_ip\":\"" << Utility::formatIp(tunnelIp)
+                 << "\",\"real_ip\":\"" << Utility::formatIp(realIp)
+                 << "\",\"online\":" << (active ? "true" : "false")
+                 << ",\"last_seen\":" << lastSeen << '}';
+            first = false;
+        }
+        else
+            cout << std::left << std::setw(34) << deviceId
+                 << std::setw(17) << Utility::formatIp(tunnelIp)
+                 << std::setw(17) << Utility::formatIp(realIp)
+                 << std::setw(10) << (active ? "online" : "offline")
+                 << formattedTime << endl;
     }
+    if (json)
+        cout << "]" << endl;
     return 0;
 }
 

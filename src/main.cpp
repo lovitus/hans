@@ -39,6 +39,8 @@
 #include <signal.h>
 #include <memory>
 #include <getopt.h>
+#include <fstream>
+#include <sys/stat.h>
 
 #ifndef AI_V4MAPPED // Not supported on OpenBSD 6.0
 #define AI_V4MAPPED 0
@@ -48,6 +50,29 @@ using std::string;
 using std::vector;
 
 static Worker *worker = NULL;
+
+static string loadSecretFile(const string &path)
+{
+    struct stat info;
+    if (stat(path.c_str(), &info) != 0)
+        throw Exception("could not inspect secret file", true);
+#ifndef WIN32
+    if ((info.st_mode & (S_IRWXG | S_IRWXO)) != 0)
+        throw Exception("secret file must not be accessible by group or others");
+#endif
+    std::ifstream input(path.c_str(), std::ios::in | std::ios::binary);
+    if (!input)
+        throw Exception("could not open secret file", true);
+    string secret((std::istreambuf_iterator<char>(input)),
+                  std::istreambuf_iterator<char>());
+    while (!secret.empty() &&
+           (secret[secret.size() - 1] == '\n' ||
+            secret[secret.size() - 1] == '\r'))
+        secret.erase(secret.size() - 1);
+    if (secret.empty() || secret.size() > 255)
+        throw Exception("secret file must contain between 1 and 255 bytes");
+    return secret;
+}
 
 static void sig_term_handler(int)
 {
@@ -66,12 +91,13 @@ static void sig_int_handler(int)
 static void usage()
 {
     std::cerr <<
-        "Hans - IP over ICMP version 1.4\n\n"
+        "Hans - IP over ICMP version 1.5\n\n"
         "RUN AS CLIENT\n"
         "  hans -c server [-fv] [-p passphrase] [-u user] [-d tun_device]\n"
         "       [-m reference_mtu] [-w auto|polls] [--device-id id]\n"
         "       [--device-id-file path] [--feature userspace]\n"
-        "       [--socks5 IPv4:port] [--shareports mappings]\n\n"
+        "       [--socks5 IPv4:port] [--shareports mappings]\n"
+        "       [--identity-file path] [--server-fingerprint hex] [--require-v4]\n\n"
         "RUN AS SERVER (linux only)\n"
         "  hans -s network [-fvr] [-p passphrase] [-u user] [-d tun_device]\n"
         "       [-m reference_mtu] [--lease-file path]\n\n"
@@ -79,16 +105,24 @@ static void usage()
         "  hans --list-peers [--lease-file path]\n\n"
         "SHOW CLIENT DEVICE ID\n"
         "  hans --show-device-id [--device-id-file path]\n\n"
+        "SHOW SECURE IDENTITY\n"
+        "  hans --show-identity [--identity-file path]\n\n"
+        "DIAGNOSTICS\n"
+        "  hans --doctor [--json]\n\n"
         "ARGUMENTS\n"
         "  -c server     Run as client. Connect to given server address.\n"
         "  -s network    Run as server. Use given network address on virtual interfaces.\n"
         "  -p passphrase Set passphrase.\n"
+        "  --passphrase-file path\n"
+        "                Read the tunnel passphrase from a private file.\n"
         "  -u username   Change user under which the program runs.\n"
         "  -a ip         Request assignment of given tunnel ip address from the server.\n"
         "  -I id         Use an explicit persistent 32-hex-character device id.\n"
         "  -k path       Load/create the client device id in this file.\n"
         "  -j path       Store/read sticky server leases in this file.\n"
         "  -l            List peers from the server lease file and exit.\n"
+        "  --json        Emit machine-readable JSON with --list-peers.\n"
+        "  --doctor      Check secure randomness and ICMP transport access.\n"
         "  -o            Print the persistent client device id and exit.\n"
         "  -r            Respond to ordinary pings in server mode.\n"
         "  -d device     Use given tun device.\n"
@@ -110,6 +144,17 @@ static void usage()
         "  --shareports mappings\n"
         "                Share VPN ports. A plain port maps to 127.0.0.1:same-port;\n"
         "                use listen-port=target-ip:target-port to override it.\n"
+        "  --identity-file path\n"
+        "                Load/create the Noise static key at this path.\n"
+        "  --show-identity\n"
+        "                Print the stable fingerprint derived from that key.\n"
+        "  --server-fingerprint hex\n"
+        "                Require the server Noise key to match this fingerprint.\n"
+        "  --require-v4  Refuse unauthenticated downgrade to legacy protocols.\n"
+        "  --socks5-user name\n"
+        "                Require RFC 1929 username/password authentication.\n"
+        "  --socks5-password-file path\n"
+        "                Read the SOCKS5 password from a private file.\n"
         "  -f            Run in foreground.\n"
         "  -v            Print debug information.\n";
 }
@@ -119,6 +164,8 @@ int main(int argc, char *argv[])
     string serverName;
     string userName;
     string passphrase;
+    string passphraseFile;
+    bool passphraseSpecified = false;
     string device;
     bool isServer = false;
     bool isClient = false;
@@ -141,10 +188,23 @@ int main(int argc, char *argv[])
     bool userspace = false;
     string socksAddress;
     vector<SharePort> sharePorts;
+    string identityFile;
+    string serverFingerprint;
+    bool showIdentity = false;
+    bool requireV4 = false;
+    bool json = false;
+    bool doctor = false;
+    string socksUser;
+    string socksPasswordFile;
+    string socksPassword;
 
     openlog(argv[0], LOG_PERROR, LOG_DAEMON);
 
-    enum { OPTION_FEATURE = 1000, OPTION_SOCKS5, OPTION_SHAREPORTS };
+    enum { OPTION_FEATURE = 1000, OPTION_SOCKS5, OPTION_SHAREPORTS,
+           OPTION_IDENTITY_FILE, OPTION_SHOW_IDENTITY,
+           OPTION_SERVER_FINGERPRINT, OPTION_REQUIRE_V4,
+           OPTION_SOCKS5_USER, OPTION_SOCKS5_PASSWORD_FILE, OPTION_JSON,
+           OPTION_DOCTOR, OPTION_PASSPHRASE_FILE };
     static struct option longOptions[] = {
         {"device-id", required_argument, NULL, 'I'},
         {"device-id-file", required_argument, NULL, 'k'},
@@ -154,6 +214,15 @@ int main(int argc, char *argv[])
         {"feature", required_argument, NULL, OPTION_FEATURE},
         {"socks5", required_argument, NULL, OPTION_SOCKS5},
         {"shareports", required_argument, NULL, OPTION_SHAREPORTS},
+        {"identity-file", required_argument, NULL, OPTION_IDENTITY_FILE},
+        {"show-identity", no_argument, NULL, OPTION_SHOW_IDENTITY},
+        {"server-fingerprint", required_argument, NULL, OPTION_SERVER_FINGERPRINT},
+        {"require-v4", no_argument, NULL, OPTION_REQUIRE_V4},
+        {"socks5-user", required_argument, NULL, OPTION_SOCKS5_USER},
+        {"socks5-password-file", required_argument, NULL, OPTION_SOCKS5_PASSWORD_FILE},
+        {"json", no_argument, NULL, OPTION_JSON},
+        {"doctor", no_argument, NULL, OPTION_DOCTOR},
+        {"passphrase-file", required_argument, NULL, OPTION_PASSPHRASE_FILE},
         {NULL, 0, NULL, 0}
     };
 
@@ -173,6 +242,7 @@ int main(int argc, char *argv[])
                 break;
             case 'p':
                 passphrase = optarg;
+                passphraseSpecified = true;
                 memset(optarg, 0, strlen(optarg));
                 break;
             case 'c':
@@ -255,6 +325,39 @@ int main(int argc, char *argv[])
                 }
                 break;
             }
+            case OPTION_IDENTITY_FILE:
+                identityFile = optarg;
+                break;
+            case OPTION_SHOW_IDENTITY:
+                showIdentity = true;
+                break;
+            case OPTION_SERVER_FINGERPRINT:
+                try { serverFingerprint = Utility::normalizeDeviceId(optarg); }
+                catch (Exception e)
+                {
+                    std::cerr << "invalid --server-fingerprint: "
+                              << e.errorMessage() << "\n";
+                    return 1;
+                }
+                break;
+            case OPTION_REQUIRE_V4:
+                requireV4 = true;
+                break;
+            case OPTION_SOCKS5_USER:
+                socksUser = optarg;
+                break;
+            case OPTION_SOCKS5_PASSWORD_FILE:
+                socksPasswordFile = optarg;
+                break;
+            case OPTION_JSON:
+                json = true;
+                break;
+            case OPTION_DOCTOR:
+                doctor = true;
+                break;
+            case OPTION_PASSPHRASE_FILE:
+                passphraseFile = optarg;
+                break;
             default:
                 usage();
                 return 1;
@@ -262,7 +365,40 @@ int main(int argc, char *argv[])
     }
 
     if (listPeers)
-        return Server::listPeers(leaseFile);
+        return Server::listPeers(leaseFile, json);
+
+    if (doctor)
+    {
+        bool randomOk = false;
+        bool icmpOk = false;
+        string error;
+        try
+        {
+            uint8_t sample[32];
+            Utility::secureRandom(sample, sizeof(sample));
+            randomOk = true;
+            Echo probe(64, true);
+            icmpOk = probe.getFd() >= 0;
+            memset(sample, 0, sizeof(sample));
+        }
+        catch (Exception e)
+        {
+            error = e.errorMessage();
+        }
+        if (json)
+            std::cout << "{\"secure_random\":" << (randomOk ? "true" : "false")
+                      << ",\"icmp_transport\":" << (icmpOk ? "true" : "false")
+                      << ",\"ready\":" << (randomOk && icmpOk ? "true" : "false")
+                      << "}" << std::endl;
+        else
+        {
+            std::cout << "secure random: " << (randomOk ? "ok" : "failed") << '\n'
+                      << "ICMP transport: " << (icmpOk ? "ok" : "failed") << '\n';
+            if (!error.empty())
+                std::cout << "error: " << error << '\n';
+        }
+        return randomOk && icmpOk ? 0 : 1;
+    }
 
     if (showDeviceId)
     {
@@ -288,6 +424,55 @@ int main(int argc, char *argv[])
         }
     }
 
+    if (showIdentity)
+    {
+        try
+        {
+            SecureIdentity identity;
+            identity.loadOrCreate(identityFile.empty() ?
+                                  Utility::defaultStateFile("identity.key") :
+                                  identityFile);
+            std::cout << identity.fingerprint() << std::endl;
+            return 0;
+        }
+        catch (Exception e)
+        {
+            syslog(LOG_ERR, "%s", e.errorMessage().data());
+            return 1;
+        }
+    }
+
+    if (!passphraseFile.empty())
+    {
+        if (passphraseSpecified)
+        {
+            std::cerr << "-p and --passphrase-file cannot be used together\n";
+            return 1;
+        }
+        try { passphrase = loadSecretFile(passphraseFile); }
+        catch (Exception e)
+        {
+            syslog(LOG_ERR, "%s", e.errorMessage().data());
+            return 1;
+        }
+    }
+
+    if (!socksUser.empty() || !socksPasswordFile.empty())
+    {
+        if (socksUser.empty() || socksUser.size() > 255 ||
+            socksPasswordFile.empty())
+        {
+            std::cerr << "--socks5-user and --socks5-password-file must be used together\n";
+            return 1;
+        }
+        try { socksPassword = loadSecretFile(socksPasswordFile); }
+        catch (Exception e)
+        {
+            syslog(LOG_ERR, "%s", e.errorMessage().data());
+            return 1;
+        }
+    }
+
     mtu -= Echo::headerSize() + Worker::headerSize();
 
     if (mtu < 68)
@@ -304,7 +489,10 @@ int main(int argc, char *argv[])
         (isServer && (changeEchoSeq || changeEchoId)) ||
         (userspace && (!isClient || (socksAddress.empty() && sharePorts.empty()))) ||
         (!userspace && (!socksAddress.empty() || !sharePorts.empty())) ||
-        (userspace && !device.empty()))
+        (userspace && !device.empty()) ||
+        ((!socksUser.empty() || !socksPasswordFile.empty()) &&
+         (!userspace || socksAddress.empty())) ||
+        (isServer && (!serverFingerprint.empty() || requireV4)))
     {
         usage();
         return 1;
@@ -341,7 +529,8 @@ int main(int argc, char *argv[])
         if (isServer)
         {
             worker = new Server(mtu, device.empty() ? NULL : &device, passphrase,
-                                network, answerPing, uid, gid, 5000, leaseFile);
+                                network, answerPing, uid, gid, 5000, leaseFile,
+                                identityFile);
         }
         else
         {
@@ -399,7 +588,9 @@ int main(int argc, char *argv[])
             worker = new Client(mtu, device.empty() ? NULL : &device,
                                 ntohl(serverIp), maxPolls, passphrase, uid, gid,
                                 changeEchoId, changeEchoSeq, clientIp, deviceId,
-                                userspace, socksAddress, sharePorts);
+                                userspace, socksAddress, sharePorts, identityFile,
+                                requireV4, serverFingerprint, socksUser,
+                                socksPassword);
 
             freeaddrinfo(res);
         }

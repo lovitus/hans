@@ -44,7 +44,7 @@ public:
            const std::string &identityFile = std::string());
     virtual ~Server();
 
-    static int listPeers(const std::string &leaseFile);
+    static int listPeers(const std::string &leaseFile, bool json = false);
 
     struct ClientConnectData
     {

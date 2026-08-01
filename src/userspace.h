@@ -25,7 +25,9 @@ class UserspaceNetwork
 public:
     UserspaceNetwork(UserspaceNetworkObserver *observer, int mtu,
                      const std::string &socksAddress,
-                     const std::vector<SharePort> &sharePorts);
+                     const std::vector<SharePort> &sharePorts,
+                     const std::string &socksUser = std::string(),
+                     const std::string &socksPassword = std::string());
     ~UserspaceNetwork();
 
     void configure(uint32_t ip, uint32_t gateway);

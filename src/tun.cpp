@@ -143,7 +143,17 @@ int Tun::read(char *buffer, uint32_t &sourceIp, uint32_t &destIp)
 {
     int length = read(buffer);
 
+    // A host may automatically attach an IPv6 link-local address to a TUN
+    // interface. Hans carries IPv4 inner packets only; never reinterpret an
+    // IPv6 or truncated packet as an IPv4 source/destination tuple.
+    if (length < (int)sizeof(IpHeader) ||
+        (((const unsigned char *)buffer)[0] >> 4) != 4)
+        return -1;
+
     IpHeader *header = (IpHeader *)buffer;
+    int headerLength = header->ip_hl * 4;
+    if (headerLength < (int)sizeof(IpHeader) || headerLength > length)
+        return -1;
     sourceIp = ntohl(header->ip_src.s_addr);
     destIp = ntohl(header->ip_dst.s_addr);
 

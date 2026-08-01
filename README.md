@@ -14,21 +14,22 @@ deployment, compatibility, and peer-management features:
 
 | Feature | What this fork adds |
 | --- | --- |
-| Persistent peer identity | Each client generates a random 128-bit device ID that is independent of its IP address, network adapter, and disk serial number. The ID can also be backed up, moved, or configured explicitly. |
+| Authenticated encrypted transport | Protocol v4 uses `Noise_XXpsk3_25519_ChaChaPoly_BLAKE2b`, with an Argon2id-derived PSK, per-installation X25519 identity keys, ChaCha20-Poly1305 packet protection, and a 64-packet replay window. All upgrades remain inside ICMP; Hans never changes to direct TCP or UDP. |
+| Persistent peer identity | A v4 client's stable 128-bit ID is the BLAKE2b fingerprint of its authenticated Noise public key. It is independent of IP address, adapter, and disk serial number, and cannot be claimed without the private key. Legacy v2/v3 peers retain their random device IDs. |
 | Sticky tunnel addresses | The server remembers device-to-IP leases across reconnects and server restarts, so clients normally keep the same tunnel address without configuring `-a`. |
 | Lease retention | Offline leases are retained while unused addresses remain. When the pool is full, only the least-recently-seen offline lease is reclaimed; active peers are never evicted. |
-| Peer inspection | `hans --list-peers` shows device ID, tunnel IP, real IP, online/offline state, and last-seen time. `hans --show-device-id` displays the local persistent identity. |
+| Peer inspection | `hans --list-peers` shows device ID, tunnel IP, real IP, online/offline state, and last-seen time; `--json` provides stable machine-readable output. `hans --show-identity` displays the v4 public fingerprint. |
 | Adaptive transport | Protocol v3 starts with conservative echo-request credits, measures reply RTT and server backlog, and adjusts the credit count instead of requiring a guessed `-w` window. |
 | Direct-reply upgrade and fallback | A client probes whether the path safely passes multiple replies for one echo request. A successful path upgrades to direct replies; sequence/ACK tracking and heartbeats automatically return it to adaptive credits if that path stops working, then probe it again after a quiet interval. |
 | Adapter-free userspace client | `--feature userspace` replaces TUN/TAP with a statically embedded lwIP stack. It exposes SOCKS5 TCP/UDP access and selected inbound ports while preserving the client's sticky VPN identity and tunnel IP. The normal kernel-interface path is unchanged unless this feature is explicitly selected. |
-| Backward-compatible protocol | New servers still accept v1/v2 clients. New clients try v3, then automatically fall back to v2 and the original protocol when connecting to an older server. |
+| Backward-compatible protocol | New servers still accept v1/v2/v3 clients. New clients try encrypted v4 first, then fall back for older servers unless `--require-v4` is set. `--server-fingerprint` pins the expected server key and prevents impersonation by another member of the same PSK group. |
 | Broad release matrix | GitHub Actions builds Linux, macOS, Windows/Cygwin (amd64 and legacy i386), FreeBSD, OpenBSD, and NetBSD binaries for the CPU architectures supported by the codebase. |
 | Static releases | Linux and BSD release binaries are fully static. Windows compiler/C++ runtimes are embedded in the executable; macOS uses only operating-system libraries. Release binaries are stripped before their isolated package tests to avoid shipping debug symbols. |
 | Old-Linux support | Statically linked musl binaries avoid glibc version dependencies and run on systems such as CentOS 7, older distributions, embedded Linux, and Alpine. |
 | Adapter fallback | Windows prefers an installed TAP-Windows adapter and automatically falls back to bundled Wintun. Linux prefers TUN and falls back to a veth pair plus `AF_PACKET` when TUN is unavailable. Auto-created interfaces use `hans1`, then `hans2`, and so on. |
 | Safe orphan cleanup | Auto-created Linux veth pairs carry a random ownership marker. On startup Hans removes a pair only when both endpoints and markers match exactly and no live process still owns it; ambiguous interfaces are always retained. |
 | Runtime packaging | Windows compiler and C++ runtimes are linked into `hans.exe`; the package includes the unavoidable `cygwin1.dll` and the signed official `wintun.dll`, allowing use without a separate Cygwin installation. |
-| Automated validation | Every build runs transport codec, sequence/ACK, adaptive-window, and userspace configuration tests plus version/help and identity/lease checks. The stripped package is then tested from an isolated product directory. Privileged Linux CI also verifies automatic direct mode, bidirectional TCP throughput, forced reply-path failure, credit fallback, recovery, and re-upgrade. A separate test runs the stripped client as an unprivileged user without TUN, exercises SOCKS5 TCP/UDP and both port-mapping forms, and compares transferred binaries byte-for-byte. |
+| Automated validation | Every build runs Noise handshake/AEAD/replay and complete v4 framing tests, transport codec, sequence/ACK, adaptive-window, userspace, identity, and lease tests. The stripped package is then tested from an isolated product directory after its build environment is removed. Privileged Linux CI verifies direct mode, bidirectional TCP, forced-path fallback/recovery, and re-upgrade. Another test runs the stripped client unprivileged without TUN and exercises authenticated SOCKS5 TCP/UDP plus both port-mapping forms. |
 | Continuous releases | Successful builds are collected and published automatically on the [Releases page](../../releases). |
 
 ## How it works
@@ -36,19 +37,22 @@ deployment, compatibility, and peer-management features:
 - The **server** owns an IP network (e.g. `10.0.0.0/24`) that only exists
   inside the tunnel. It takes `network + 1` for itself and hands out
   `network + 100`, `network + 101`, ... to connecting clients.
-- The **client** authenticates with a SHA1 challenge/response derived from a
-  shared passphrase, then gets assigned a tunnel IP and a virtual `tun`
-  interface that carries its IPv4 traffic wrapped inside ICMP echo
-  request/reply packets to/from the server.
-- New clients also send a persistent random device ID. The server uses it for
-  sticky leases, so a peer normally receives the same tunnel IP after changing
-  networks or reconnecting.
+- A current **client** and server perform a three-message Noise XXpsk3
+  handshake entirely inside ICMP. The passphrase is hardened once with
+  Argon2id; ephemeral/static X25519 keys authenticate the peers and derive
+  directional ChaCha20-Poly1305 keys. Header type, receiver index, counter,
+  and payload are authenticated, and replayed packets are discarded.
+- The authenticated client public-key fingerprint owns the sticky lease.
+  Receiver indexes, rather than source addresses, distinguish encrypted peers,
+  so several clients behind one NAT can coexist. A source-address change is
+  adopted only after a packet passes AEAD verification.
 - An explicitly selected userspace client does not create a kernel interface.
   Its embedded lwIP stack owns the assigned tunnel IP: SOCKS5 connections are
   emitted with that IP, and packets arriving at shared VPN ports are terminated
   by lwIP and bridged to local host sockets. Server and peer protocol behavior
   is identical to a normal client.
-- Protocol v3 does not use a fixed receive window by default. It begins with a
+- The v4 encrypted payload carries the existing v3 adaptive transport. It does
+  not use a fixed receive window by default. It begins with a
   small set of echo-request credits and grows or shrinks that set using measured
   RTT and queued work. It also probes for safe multi-reply delivery and uses
   direct replies when possible. Every v3 packet carries a session ID, sequence,
@@ -57,10 +61,9 @@ deployment, compatibility, and peer-management features:
 - **Server mode is Linux-only** (it relies on Linux-specific networking
   behavior). **Client mode** works on Linux, FreeBSD, OpenBSD, NetBSD, macOS
   and Windows (via Cygwin).
-- The passphrase is only used to **authenticate** the handshake (SHA1
-  challenge/response) — the tunneled IP payload itself is **not encrypted**.
-  If you need confidentiality, run something like SSH/TLS/WireGuard on top of
-  the tunnel.
+- Legacy v1-v3 sessions use their original SHA1 challenge and are not
+  encrypted. Use `--require-v4` when downgrade compatibility is not wanted.
+  `--server-fingerprint` additionally pins the server's v4 public key.
 
 ## Downloads
 
@@ -236,11 +239,20 @@ accepted; Hans never exposes all 1–65535 ports implicitly. Services reached
 through a shared port see the connection coming from a local host socket, not
 the original peer address.
 
-The SOCKS listener has no authentication. It defaults by convention to
-`127.0.0.1`; binding it to a non-loopback address produces a warning and should
-only be done behind an appropriate host firewall. Hans authenticates the peer
-handshake but does not encrypt tunnel payloads, so use SSH/TLS or another
-encrypted protocol for sensitive traffic.
+The SOCKS listener defaults to `127.0.0.1`. For a shared listener, enable
+dependency-free RFC 1929 authentication and keep the password off the command
+line:
+
+```sh
+chmod 600 /etc/hans/socks.password
+./hans -c server.example.com -p secret -f \
+  --feature userspace --socks5 0.0.0.0:1080 \
+  --socks5-user hans --socks5-password-file /etc/hans/socks.password
+```
+
+Binding a non-loopback listener without authentication emits a warning. The
+password file must contain 1–255 bytes and, on POSIX systems, must not be
+accessible by group or others.
 
 The embedded lwIP 2.2.1 source is compiled and linked into every release. It
 adds no DLL, shared-library, service, Go runtime, or Rust runtime dependency,
@@ -347,11 +359,11 @@ whitelist it server-side), request it explicitly:
 
 ## Persistent peer identity and sticky leases
 
-On first start, a client generates a random 128-bit device ID and stores it in
-`/var/lib/hans/device-id` (or `$HOME/.hans/device-id` when not running as
-root). The ID is not derived from an IP address, network adapter, disk serial
-number, or other hardware, so those values can change without changing the
-peer identity.
+On first v4 start, a client generates a 32-byte X25519 private key in
+`/var/lib/hans/identity.key` (or `$HOME/.hans/identity.key` when not root), with
+mode `0600`. The 128-bit BLAKE2b fingerprint of its public key is the server's
+device ID. It is not derived from IP address, adapter, or disk serial number.
+Back up the key if the identity must survive loss of all local storage.
 
 The server records leases in `/var/lib/hans/leases`. A reconnecting device
 gets its previous tunnel IP whenever possible. Offline leases are retained
@@ -363,7 +375,9 @@ Inspect the local device ID or the server's lease table with:
 
 ```sh
 sudo ./hans --show-device-id
+sudo ./hans --show-identity
 sudo ./hans --list-peers
+sudo ./hans --list-peers --json
 ```
 
 Example peer output:
@@ -381,16 +395,15 @@ Use custom state paths when packaging Hans or running more than one instance:
 ./hans --list-peers --lease-file /var/lib/hans/site-a.leases
 ```
 
-You can also supply a fixed 32-character hexadecimal ID with `--device-id`.
-The device ID is not a secret, but it should be unique. If a system disk is
-replaced without copying the ID file, copy the old ID from backup or configure
-the same value explicitly; no software-only identity can survive loss of all
-locally persisted state.
+`--device-id` and `--device-id-file` remain for legacy v2/v3 compatibility.
+They cannot override an encrypted v4 identity: v4 lease ownership always comes
+from proof of possession of the Noise private key. Use `--identity-file` to
+choose or restore that key.
 
 Servers accept legacy clients without a device ID (those clients continue to
-receive non-sticky leases). New clients negotiate protocol v3 first and
-automatically fall back through v2 to the original connection request when
-talking to an older server.
+receive non-sticky leases). New clients negotiate v4 first and automatically
+fall back through v3/v2/v1 for older servers. Add `--require-v4` to refuse this
+compatibility downgrade.
 
 ## Make the server also answer normal pings
 
@@ -441,16 +454,23 @@ RUN AS CLIENT
        [-m reference_mtu] [-w auto|polls] [--device-id id]
        [--device-id-file path] [--feature userspace]
        [--socks5 IPv4:port] [--shareports mappings]
+       [--identity-file path] [--server-fingerprint hex] [--require-v4]
 
 RUN AS SERVER (linux only)
   hans -s network [-fvr] [-p passphrase] [-u user] [-d tun_device]
        [-m reference_mtu] [--lease-file path]
 
 LIST SERVER PEERS
-  hans --list-peers [--lease-file path]
+  hans --list-peers [--lease-file path] [--json]
 
 SHOW CLIENT DEVICE ID
   hans --show-device-id [--device-id-file path]
+
+SHOW SECURE IDENTITY
+  hans --show-identity [--identity-file path]
+
+DIAGNOSTICS
+  hans --doctor [--json]
 
 ARGUMENTS
   -c server     Run as client. Connect to given server address.
@@ -476,6 +496,19 @@ ARGUMENTS
   --shareports mappings
                 Share VPN ports; plain N maps to 127.0.0.1:N, while
                 listen=target-ip:target-port specifies an explicit target.
+  --socks5-user name
+                Require RFC 1929 username/password authentication.
+  --socks5-password-file path
+                Read the SOCKS5 password from a private 0600 file.
+  --identity-file path
+                Load/create the Noise static private key at this path.
+  --passphrase-file path
+                Read the tunnel passphrase from a private 0600 file.
+  --server-fingerprint hex
+                Pin the expected server Noise fingerprint.
+  --require-v4  Refuse fallback to an unencrypted legacy protocol.
+  --json        Emit JSON for --list-peers or --doctor.
+  --doctor      Check secure randomness and ICMP transport access.
   -f            Run in foreground.
   -v            Print debug information.
 ```

@@ -1,3 +1,13 @@
+Release 1.5 (August 2026)
+-------------------------
+* Add encrypted protocol v4 with Noise XXpsk3, Argon2id, X25519,
+  ChaCha20-Poly1305, receiver indexes, and replay protection
+* Bind sticky peer identity to the authenticated Noise public key
+* Add server-key pinning, optional downgrade refusal, and identity inspection
+* Add RFC 1929 SOCKS5 authentication with a private password file
+* Add JSON peer listing and portable ICMP/entropy diagnostics
+* Add complete v4 framing, tamper, wrong-PSK, replay, and package tests
+
 Release 1.4 (July 2026)
 -----------------------
 * Add an optional adapter-free userspace client using statically embedded lwIP
