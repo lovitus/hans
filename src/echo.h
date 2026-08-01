@@ -23,17 +23,40 @@
 #include <string>
 #include <vector>
 #include <stdint.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
 
 class Echo
 {
 public:
+    struct Address
+    {
+        Address();
+        Address(const struct sockaddr *address, socklen_t length);
+        static Address ipv4(uint32_t hostOrderAddress);
+        int family() const;
+        bool isIpv4() const;
+        uint32_t ipv4Value() const;
+        const struct sockaddr *sockaddrValue() const;
+        socklen_t length() const { return addressLength; }
+        std::string format() const;
+        bool operator==(const Address &other) const;
+        bool operator!=(const Address &other) const { return !(*this == other); }
+
+        struct sockaddr_storage storage;
+        socklen_t addressLength;
+    };
+
     Echo(int maxPayloadSize, bool preferUnprivileged = false);
     ~Echo();
 
     int getFd() { return fd; }
+    int getIpv6Fd() { return ipv6Fd; }
 
-    void send(int payloadLength, uint32_t realIp, bool reply, uint16_t id, uint16_t seq);
-    int receive(uint32_t &realIp, bool &reply, uint16_t &id, uint16_t &seq);
+    void send(int payloadLength, const Address &address, bool reply,
+              uint16_t id, uint16_t seq);
+    int receive(int readyFd, Address &address, bool &reply,
+                uint16_t &id, uint16_t &seq);
 
     char *sendPayloadBuffer();
     char *receivePayloadBuffer();
@@ -52,8 +75,10 @@ protected:
     uint16_t icmpChecksum(const char *data, int length);
 
     int fd;
+    int ipv6Fd;
     int bufferSize;
     bool datagramSocket;
+    bool ipv6DatagramSocket;
 #ifdef WIN32
     class WindowsBackend;
     WindowsBackend *windowsBackend;

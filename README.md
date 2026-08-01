@@ -91,10 +91,10 @@ Windows. It sends ICMP through the operating system's asynchronous IP Helper
 API and uses only the packaged `hans.exe` and `cygwin1.dll`; `wintun.dll`
 remains in the standard archive for normal interface mode.
 
-Server hostnames are supported when DNS provides an IPv4 **A** record. The
-outer Hans transport currently uses IPv4 ICMP and does not yet implement
-ICMPv6, so an AAAA-only hostname or an IPv6 literal cannot be used as the
-server address. Add an A record or use an IPv4-capable hostname/address.
+Server hostnames and literals may use either IPv4 or IPv6. Hans prefers an
+IPv4 **A** record when a hostname has both families, and falls back to an IPv6
+**AAAA** record when no A record is available. The outer carrier is ICMP or
+ICMPv6; the VPN address space transported inside it remains IPv4.
 
 **Linux: which binary should I use?**
 

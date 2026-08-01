@@ -551,7 +551,7 @@ int main(int argc, char *argv[])
             struct addrinfo hints = {0};
             struct addrinfo *res = NULL;
             struct addrinfo *address = NULL;
-            bool foundIpv6 = false;
+            struct addrinfo *ipv6Address = NULL;
 
             hints.ai_family = AF_UNSPEC;
             hints.ai_flags = 0;
@@ -568,25 +568,26 @@ int main(int argc, char *argv[])
             {
                 if (candidate->ai_family == AF_INET && address == NULL)
                     address = candidate;
-                else if (candidate->ai_family == AF_INET6)
-                    foundIpv6 = true;
+                else if (candidate->ai_family == AF_INET6 && ipv6Address == NULL)
+                    ipv6Address = candidate;
             }
 
             if (address == NULL)
             {
-                if (foundIpv6)
-                    syslog(LOG_ERR, "server name resolves only to IPv6; Hans currently requires an IPv4 A record for its ICMP transport");
-                else
-                    syslog(LOG_ERR, "server name has no usable IPv4 address");
-                freeaddrinfo(res);
-                return 1;
+                address = ipv6Address;
+                if (address == NULL)
+                {
+                    syslog(LOG_ERR, "server name has no usable IPv4 or IPv6 address");
+                    freeaddrinfo(res);
+                    return 1;
+                }
             }
 
-            sockaddr_in *sockaddr = reinterpret_cast<sockaddr_in *>(address->ai_addr);
-            uint32_t serverIp = sockaddr->sin_addr.s_addr;
+            Echo::Address serverAddress(address->ai_addr,
+                                        (socklen_t)address->ai_addrlen);
 
             worker = new Client(mtu, device.empty() ? NULL : &device,
-                                ntohl(serverIp), maxPolls, passphrase, uid, gid,
+                                serverAddress, maxPolls, passphrase, uid, gid,
                                 changeEchoId, changeEchoSeq, clientIp, deviceId,
                                 userspace, socksAddress, sharePorts, identityFile,
                                 requireV4, serverFingerprint, socksUser,

@@ -63,7 +63,8 @@ namespace
     }
 }
 
-Client::Client(int tunnelMtu, const string *deviceName, uint32_t serverIp,
+Client::Client(int tunnelMtu, const string *deviceName,
+               const Echo::Address &serverAddress,
                int maxPolls, const string &passphrase, uid_t uid, gid_t gid,
                bool changeEchoId, bool changeEchoSeq, uint32_t desiredIp,
                const string &deviceId, bool userspace,
@@ -75,7 +76,7 @@ Client::Client(int tunnelMtu, const string *deviceName, uint32_t serverIp,
     : Worker(tunnelMtu, deviceName, false, uid, gid, !userspace, userspace),
       auth(passphrase)
 {
-    this->serverIp = serverIp;
+    this->serverAddress = serverAddress;
     this->clientIp = INADDR_NONE;
     this->desiredIp = desiredIp;
     this->autoPoll = maxPolls < 0;
@@ -265,10 +266,10 @@ void Client::sendChallengeResponse(int dataLength)
 }
 
 bool Client::handleEchoData(const TunnelHeader &header, int dataLength,
-                            uint32_t realIp, bool reply, uint16_t id,
+                            const Echo::Address &realAddress, bool reply, uint16_t id,
                             uint16_t seq)
 {
-    if (realIp != serverIp || !reply)
+    if (realAddress != serverAddress || !reply)
         return false;
 
     if (header.magic != serverMagic())
@@ -376,12 +377,15 @@ bool Client::handleEchoData(const TunnelHeader &header, int dataLength,
                                echoReceivePayloadBuffer() + 10,
                                sizeof(negotiatedMtu));
                         negotiatedMtu = ntohs(negotiatedMtu);
-                        if (negotiatedMtu >= 68 && negotiatedMtu < tunnelMtu)
+                        if (negotiatedMtu >= 68 && negotiatedMtu <= tunnelMtu)
                         {
-                            tunnelMtu = negotiatedMtu;
-                            tun.setMtu(tunnelMtu);
-                            if (userspaceNetwork != NULL)
-                                userspaceNetwork->setMtu(tunnelMtu);
+                            if (negotiatedMtu < tunnelMtu)
+                            {
+                                tunnelMtu = negotiatedMtu;
+                                tun.setMtu(tunnelMtu);
+                                if (userspaceNetwork != NULL)
+                                    userspaceNetwork->setMtu(tunnelMtu);
+                            }
                             syslog(LOG_INFO, "negotiated tunnel MTU %d",
                                    tunnelMtu);
                         }
@@ -478,7 +482,7 @@ void Client::sendEchoToServer(Worker::TunnelHeader::Type type, int dataLength)
         setTimeout(KEEP_ALIVE_INTERVAL);
 
     sendEcho(clientMagic(), type, dataLength,
-             serverIp, false, nextEchoId, nextEchoSequence);
+             serverAddress, false, nextEchoId, nextEchoSequence);
 
     if (changeEchoId)
         nextEchoId = nextEchoId + 38543; // some random prime

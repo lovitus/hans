@@ -68,6 +68,7 @@ jobs:
           cp scripts/test-hans.sh "dist/${{ matrix.label }}/test-hans.sh"
           cp scripts/test-identity-leases.sh "dist/${{ matrix.label }}/test-identity-leases.sh"
           cp scripts/test-userspace.sh "dist/${{ matrix.label }}/test-userspace.sh"
+          cp scripts/test-ipv6.sh "dist/${{ matrix.label }}/test-ipv6.sh"
           cp scripts/test-socks5-udp.py "dist/${{ matrix.label }}/test-socks5-udp.py"
           docker run --rm \
             -e HANS_SKIP_CONNECTION_TEST=1 \
@@ -328,6 +329,20 @@ jobs:
               DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
                 curl iproute2 python3 util-linux
               sh /product/test-userspace.sh /product/hans
+            '
+      - name: Test packaged ICMPv6 outer transport
+        if: matrix.label == 'amd64-ubuntu24.04'
+        run: |
+          docker run --rm --privileged \
+            -v "${{ github.workspace }}/dist/${{ matrix.label }}:/product:ro" \
+            "${{ matrix.runtime_image }}" \
+            bash -c '
+              set -e
+              apt-get update -qq
+              DEBIAN_FRONTEND=noninteractive apt-get install -y -qq iproute2 iputils-ping
+              mkdir -p /dev/net
+              if [ ! -c /dev/net/tun ]; then mknod /dev/net/tun c 10 200; fi
+              sh /product/test-ipv6.sh /product/hans
             '
       - uses: actions/upload-artifact@v4
         with:

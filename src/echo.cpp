@@ -25,6 +25,7 @@
 #include <sys/types.h>
 #include <arpa/inet.h>
 #include <unistd.h>
+#include <netdb.h>
 
 #ifdef WIN32
 #include <w32api/windows.h>
@@ -57,6 +58,22 @@ namespace
         HansIpOptionInformation32 options;
     };
 
+    struct HansIpv6AddressEx
+    {
+        unsigned short port;
+        unsigned short padding;
+        DWORD flowInfo;
+        unsigned short address[8];
+        DWORD scopeId;
+    };
+
+    struct HansIcmp6EchoReply
+    {
+        HansIpv6AddressEx address;
+        DWORD status;
+        unsigned int roundTripTime;
+    };
+
     const DWORD HANS_IP_SUCCESS = 0;
 }
 
@@ -67,7 +84,7 @@ public:
     {
         std::vector<char> payload;
         std::vector<char> replyBuffer;
-        uint32_t realIp;
+        Echo::Address address;
         uint16_t id;
         uint16_t seq;
         HANDLE event;
@@ -80,13 +97,19 @@ public:
                                               void *, void *,
                                               DWORD, DWORD);
     typedef DWORD (WINAPI *ParseRepliesFunction)(void *, DWORD);
+    typedef DWORD (WINAPI *SendEcho6Function)(HANDLE, HANDLE, FARPROC, void *,
+                                               void *, void *, void *,
+                                               unsigned short, void *, void *,
+                                               DWORD, DWORD);
 
     WindowsBackend(int maxPayloadSize)
-        : library(NULL), icmpHandle(INVALID_HANDLE_VALUE), wakeEvent(NULL),
+        : library(NULL), icmpHandle(INVALID_HANDLE_VALUE),
+          icmp6Handle(INVALID_HANDLE_VALUE), wakeEvent(NULL),
           stopping(false), threadStarted(false), createFileFunction(NULL),
           closeHandleFunction(NULL), sendEchoFunction(NULL),
-          parseRepliesFunction(NULL),
-          replyBufferSize(sizeof(HansIcmpEchoReply32) + maxPayloadSize + 32)
+          parseRepliesFunction(NULL), sendEcho6Function(NULL),
+          parseReplies6Function(NULL),
+          replyBufferSize(sizeof(HansIcmp6EchoReply) + maxPayloadSize + 32)
     {
         pipeFds[0] = pipeFds[1] = -1;
         library = LoadLibraryA("iphlpapi.dll");
@@ -100,6 +123,13 @@ public:
             GetProcAddress(library, "IcmpSendEcho2"));
         parseRepliesFunction = reinterpret_cast<ParseRepliesFunction>(
             GetProcAddress(library, "IcmpParseReplies"));
+        CreateFileFunction createFile6Function =
+            reinterpret_cast<CreateFileFunction>(
+                GetProcAddress(library, "Icmp6CreateFile"));
+        sendEcho6Function = reinterpret_cast<SendEcho6Function>(
+            GetProcAddress(library, "Icmp6SendEcho2"));
+        parseReplies6Function = reinterpret_cast<ParseRepliesFunction>(
+            GetProcAddress(library, "Icmp6ParseReplies"));
         if (createFileFunction == NULL || closeHandleFunction == NULL ||
             sendEchoFunction == NULL || parseRepliesFunction == NULL)
             throw Exception("resolving Windows ICMP API");
@@ -107,6 +137,9 @@ public:
         icmpHandle = createFileFunction();
         if (icmpHandle == INVALID_HANDLE_VALUE)
             throw Exception("creating Windows ICMP handle", true);
+        if (createFile6Function != NULL && sendEcho6Function != NULL &&
+            parseReplies6Function != NULL)
+            icmp6Handle = createFile6Function();
         wakeEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
         if (wakeEvent == NULL || pipe(pipeFds) != 0)
             throw Exception("creating Windows ICMP notification channel", true);
@@ -139,6 +172,8 @@ public:
             CloseHandle(wakeEvent);
         if (icmpHandle != INVALID_HANDLE_VALUE && closeHandleFunction != NULL)
             closeHandleFunction(icmpHandle);
+        if (icmp6Handle != INVALID_HANDLE_VALUE && closeHandleFunction != NULL)
+            closeHandleFunction(icmp6Handle);
         if (library != NULL)
             FreeLibrary(library);
         pthread_mutex_destroy(&mutex);
@@ -149,7 +184,7 @@ public:
         return pipeFds[0];
     }
 
-    void send(const char *payload, int length, uint32_t realIp,
+    void send(const char *payload, int length, const Echo::Address &address,
               uint16_t id, uint16_t seq)
     {
         Request *request = new Request;
@@ -158,7 +193,7 @@ public:
         // ReplySize therefore has to follow the maximum receive payload, not
         // the size of this particular request.
         request->replyBuffer.resize(replyBufferSize);
-        request->realIp = realIp;
+        request->address = address;
         request->id = id;
         request->seq = seq;
         request->event = CreateEvent(NULL, FALSE, FALSE, NULL);
@@ -173,7 +208,7 @@ public:
         SetEvent(wakeEvent);
     }
 
-    bool receive(std::vector<char> &payload, uint32_t &realIp,
+    bool receive(std::vector<char> &payload, Echo::Address &address,
                  uint16_t &id, uint16_t &seq)
     {
         char notification;
@@ -188,8 +223,29 @@ public:
         completed.pop_front();
         pthread_mutex_unlock(&mutex);
 
-        DWORD replyCount = parseRepliesFunction(&request->replyBuffer[0],
-                                                 (DWORD)request->replyBuffer.size());
+        bool ipv6 = request->address.family() == AF_INET6;
+        DWORD replyCount = (ipv6 ? parseReplies6Function : parseRepliesFunction)(
+            &request->replyBuffer[0], (DWORD)request->replyBuffer.size());
+        if (ipv6)
+        {
+            HansIcmp6EchoReply *reply =
+                reinterpret_cast<HansIcmp6EchoReply *>(
+                    &request->replyBuffer[0]);
+            bool valid = replyCount > 0 && reply->status == HANS_IP_SUCCESS &&
+                request->replyBuffer.size() >= sizeof(*reply) +
+                                                     request->payload.size();
+            if (valid)
+            {
+                const char *data = &request->replyBuffer[sizeof(*reply)];
+                payload.assign(data, data + request->payload.size());
+                address = request->address;
+                id = request->id;
+                seq = request->seq;
+            }
+            CloseHandle(request->event);
+            delete request;
+            return valid;
+        }
         HansIcmpEchoReply32 *reply = reinterpret_cast<HansIcmpEchoReply32 *>(
             &request->replyBuffer[0]);
         const char *bufferBegin = &request->replyBuffer[0];
@@ -220,7 +276,7 @@ public:
         if (valid)
         {
             payload.assign(data, data + reply->dataSize);
-            realIp = ntohl(reply->address);
+            address = Echo::Address::ipv4(ntohl(reply->address));
             id = request->id;
             seq = request->seq;
         }
@@ -250,12 +306,38 @@ private:
             queued.pop_front();
             pthread_mutex_unlock(&mutex);
 
-            DWORD result = sendEchoFunction(
-                icmpHandle, request->event, NULL, NULL, htonl(request->realIp),
-                request->payload.empty() ? NULL : &request->payload[0],
-                (unsigned short)request->payload.size(), NULL,
-                &request->replyBuffer[0], (DWORD)request->replyBuffer.size(),
-                WINDOWS_ICMP_REQUEST_TIMEOUT_MS);
+            DWORD result;
+            if (request->address.family() == AF_INET6)
+            {
+                HansIpv6AddressEx source;
+                memset(&source, 0, sizeof(source));
+                HansIpv6AddressEx destination;
+                memset(&destination, 0, sizeof(destination));
+                const struct sockaddr_in6 *address =
+                    reinterpret_cast<const struct sockaddr_in6 *>(
+                        request->address.sockaddrValue());
+                memcpy(destination.address, &address->sin6_addr,
+                       sizeof(destination.address));
+                destination.scopeId = address->sin6_scope_id;
+                result = icmp6Handle == INVALID_HANDLE_VALUE ? 0 :
+                    sendEcho6Function(
+                        icmp6Handle, request->event, NULL, NULL, &source,
+                        &destination,
+                        request->payload.empty() ? NULL : &request->payload[0],
+                        (unsigned short)request->payload.size(), NULL,
+                        &request->replyBuffer[0],
+                        (DWORD)request->replyBuffer.size(),
+                        WINDOWS_ICMP_REQUEST_TIMEOUT_MS);
+            }
+            else
+                result = sendEchoFunction(
+                    icmpHandle, request->event, NULL, NULL,
+                    htonl(request->address.ipv4Value()),
+                    request->payload.empty() ? NULL : &request->payload[0],
+                    (unsigned short)request->payload.size(), NULL,
+                    &request->replyBuffer[0],
+                    (DWORD)request->replyBuffer.size(),
+                    WINDOWS_ICMP_REQUEST_TIMEOUT_MS);
             if (result > 0)
                 complete(request);
             else if (GetLastError() == ERROR_IO_PENDING)
@@ -321,6 +403,7 @@ private:
 
     HMODULE library;
     HANDLE icmpHandle;
+    HANDLE icmp6Handle;
     HANDLE wakeEvent;
     int pipeFds[2];
     pthread_t thread;
@@ -331,6 +414,8 @@ private:
     CloseHandleFunction closeHandleFunction;
     SendEchoFunction sendEchoFunction;
     ParseRepliesFunction parseRepliesFunction;
+    SendEcho6Function sendEcho6Function;
+    ParseRepliesFunction parseReplies6Function;
     size_t replyBufferSize;
     std::deque<Request *> queued;
     std::deque<Request *> active;
@@ -348,10 +433,89 @@ private:
 
 typedef ip IpHeader;
 
+namespace
+{
+    const int NETWORK_HEADER_RESERVE = 40;
+}
+
+Echo::Address::Address() : addressLength(0)
+{
+    memset(&storage, 0, sizeof(storage));
+}
+
+Echo::Address::Address(const struct sockaddr *address, socklen_t length)
+    : addressLength(length > sizeof(storage) ? sizeof(storage) : length)
+{
+    memset(&storage, 0, sizeof(storage));
+    memcpy(&storage, address, addressLength);
+}
+
+Echo::Address Echo::Address::ipv4(uint32_t hostOrderAddress)
+{
+    struct sockaddr_in address;
+    memset(&address, 0, sizeof(address));
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(hostOrderAddress);
+    return Address((const struct sockaddr *)&address, sizeof(address));
+}
+
+int Echo::Address::family() const
+{
+    return addressLength == 0 ? AF_UNSPEC :
+           ((const struct sockaddr *)&storage)->sa_family;
+}
+
+bool Echo::Address::isIpv4() const
+{
+    return family() == AF_INET;
+}
+
+uint32_t Echo::Address::ipv4Value() const
+{
+    if (!isIpv4()) return 0;
+    return ntohl(((const struct sockaddr_in *)&storage)->sin_addr.s_addr);
+}
+
+const struct sockaddr *Echo::Address::sockaddrValue() const
+{
+    return (const struct sockaddr *)&storage;
+}
+
+std::string Echo::Address::format() const
+{
+    char host[NI_MAXHOST];
+    if (addressLength == 0 ||
+        getnameinfo(sockaddrValue(), addressLength, host, sizeof(host),
+                    NULL, 0, NI_NUMERICHOST) != 0)
+        return "unknown";
+    return host;
+}
+
+bool Echo::Address::operator==(const Address &other) const
+{
+    if (family() != other.family()) return false;
+    if (family() == AF_INET)
+        return ((const struct sockaddr_in *)&storage)->sin_addr.s_addr ==
+               ((const struct sockaddr_in *)&other.storage)->sin_addr.s_addr;
+    if (family() == AF_INET6)
+    {
+        const struct sockaddr_in6 *left =
+            (const struct sockaddr_in6 *)&storage;
+        const struct sockaddr_in6 *right =
+            (const struct sockaddr_in6 *)&other.storage;
+        return left->sin6_scope_id == right->sin6_scope_id &&
+               memcmp(&left->sin6_addr, &right->sin6_addr,
+                      sizeof(left->sin6_addr)) == 0;
+    }
+    return false;
+}
+
 Echo::Echo(int maxPayloadSize, bool preferUnprivileged)
 {
     datagramSocket = false;
+    ipv6DatagramSocket = false;
     fd = -1;
+    ipv6Fd = -1;
 #ifdef WIN32
     windowsBackend = NULL;
     if (preferUnprivileged)
@@ -385,6 +549,15 @@ Echo::Echo(int maxPayloadSize, bool preferUnprivileged)
         throw Exception("creating icmp socket", true);
     }
 
+    if (preferUnprivileged)
+    {
+        ipv6Fd = socket(AF_INET6, SOCK_DGRAM, IPPROTO_ICMPV6);
+        if (ipv6Fd >= 0)
+            ipv6DatagramSocket = true;
+    }
+    if (ipv6Fd == -1)
+        ipv6Fd = socket(AF_INET6, SOCK_RAW, IPPROTO_ICMPV6);
+
     bufferSize = maxPayloadSize + headerSize();
     sendBuffer.resize(bufferSize);
     receiveBuffer.resize(bufferSize);
@@ -400,14 +573,17 @@ Echo::~Echo()
     }
 #endif
     close(fd);
+    if (ipv6Fd >= 0)
+        close(ipv6Fd);
 }
 
 int Echo::headerSize()
 {
-    return sizeof(IpHeader) + sizeof(EchoHeader);
+    return NETWORK_HEADER_RESERVE + sizeof(EchoHeader);
 }
 
-void Echo::send(int payloadLength, uint32_t realIp, bool reply, uint16_t id, uint16_t seq)
+void Echo::send(int payloadLength, const Address &address, bool reply,
+                uint16_t id, uint16_t seq)
 {
 #ifdef WIN32
     if (windowsBackend != NULL)
@@ -416,37 +592,43 @@ void Echo::send(int payloadLength, uint32_t realIp, bool reply, uint16_t id, uin
             syslog(LOG_WARNING, "Windows ICMP helper cannot send echo replies");
         else
             windowsBackend->send(sendPayloadBuffer(), payloadLength,
-                                 realIp, id, seq);
+                                 address, id, seq);
         return;
     }
 #endif
-    struct sockaddr_in target;
-    target.sin_family = AF_INET;
-    target.sin_addr.s_addr = htonl(realIp);
-
-    if (payloadLength + sizeof(IpHeader) + sizeof(EchoHeader) > bufferSize)
+    if (payloadLength + headerSize() > bufferSize)
         throw Exception("packet too big");
 
-    EchoHeader *header = (EchoHeader *)(sendBuffer.data() + sizeof(IpHeader));
-    header->type = reply ? 0: 8;
+    int sendFd = address.family() == AF_INET6 ? ipv6Fd : fd;
+    if (sendFd < 0)
+        throw Exception("the operating system did not provide an ICMPv6 socket");
+    EchoHeader *header = (EchoHeader *)(sendBuffer.data() +
+                                       NETWORK_HEADER_RESERVE);
+    header->type = address.family() == AF_INET6 ?
+                   (reply ? 129 : 128) : (reply ? 0 : 8);
     header->code = 0;
     header->id = htons(id);
     header->seq = htons(seq);
     header->chksum = 0;
-    header->chksum = icmpChecksum(sendBuffer.data() + sizeof(IpHeader), payloadLength + sizeof(EchoHeader));
+    if (address.family() == AF_INET)
+        header->chksum = icmpChecksum(sendBuffer.data() + NETWORK_HEADER_RESERVE,
+                                     payloadLength + sizeof(EchoHeader));
 
-    int result = sendto(fd, sendBuffer.data() + sizeof(IpHeader), payloadLength + sizeof(EchoHeader), 0, (struct sockaddr *)&target, sizeof(struct sockaddr_in));
+    int result = sendto(sendFd, sendBuffer.data() + NETWORK_HEADER_RESERVE,
+                        payloadLength + sizeof(EchoHeader), 0,
+                        address.sockaddrValue(), address.length());
     if (result == -1)
         syslog(LOG_ERR, "error sending icmp packet: %s", strerror(errno));
 }
 
-int Echo::receive(uint32_t &realIp, bool &reply, uint16_t &id, uint16_t &seq)
+int Echo::receive(int readyFd, Address &address, bool &reply,
+                  uint16_t &id, uint16_t &seq)
 {
 #ifdef WIN32
     if (windowsBackend != NULL)
     {
         std::vector<char> payload;
-        if (!windowsBackend->receive(payload, realIp, id, seq))
+        if (!windowsBackend->receive(payload, address, id, seq))
             return -1;
         if (payload.size() + headerSize() > receiveBuffer.size())
             return -1;
@@ -455,46 +637,46 @@ int Echo::receive(uint32_t &realIp, bool &reply, uint16_t &id, uint16_t &seq)
         return (int)payload.size();
     }
 #endif
-    struct sockaddr_in source;
-    int source_addr_len = sizeof(struct sockaddr_in);
+    struct sockaddr_storage source;
+    socklen_t sourceAddressLength = sizeof(source);
 
     char *target = receiveBuffer.data();
-    int dataLength = recvfrom(fd, target, bufferSize, 0,
+    int dataLength = recvfrom(readyFd, target, bufferSize, 0,
                               (struct sockaddr *)&source,
-                              (socklen_t *)&source_addr_len);
+                              &sourceAddressLength);
     if (dataLength == -1)
     {
         syslog(LOG_ERR, "error receiving icmp packet: %s", strerror(errno));
         return -1;
     }
 
-    if (datagramSocket)
+    address = Address((const struct sockaddr *)&source, sourceAddressLength);
+    int icmpOffset = 0;
+    if (dataLength > 0 && ((unsigned char)target[0] >> 4) == 4)
     {
-        bool includesIpHeader = dataLength >= (int)sizeof(IpHeader) &&
-                                (((unsigned char)target[0] >> 4) == 4);
-        if (!includesIpHeader)
-        {
-            if (dataLength + (int)sizeof(IpHeader) > bufferSize)
-                return -1;
-            memmove(target + sizeof(IpHeader), target, dataLength);
-            memset(target, 0, sizeof(IpHeader));
-            dataLength += sizeof(IpHeader);
-        }
+        if (dataLength < (int)sizeof(IpHeader)) return -1;
+        icmpOffset = ((unsigned char)target[0] & 15) * 4;
     }
+    else if (dataLength > 0 && ((unsigned char)target[0] >> 4) == 6)
+        icmpOffset = 40;
+    if (icmpOffset < 0 || dataLength - icmpOffset < (int)sizeof(EchoHeader))
+        return -1;
+    int icmpLength = dataLength - icmpOffset;
+    memmove(target + NETWORK_HEADER_RESERVE, target + icmpOffset, icmpLength);
 
-    if (dataLength < sizeof(IpHeader) + sizeof(EchoHeader))
+    EchoHeader *header = (EchoHeader *)(receiveBuffer.data() +
+                                       NETWORK_HEADER_RESERVE);
+    bool ipv6 = address.family() == AF_INET6;
+    if ((!ipv6 && header->type != 0 && header->type != 8) ||
+        (ipv6 && header->type != 128 && header->type != 129) ||
+        header->code != 0)
         return -1;
 
-    EchoHeader *header = (EchoHeader *)(receiveBuffer.data() + sizeof(IpHeader));
-    if ((header->type != 0 && header->type != 8) || header->code != 0)
-        return -1;
-
-    realIp = ntohl(source.sin_addr.s_addr);
-    reply = header->type == 0;
+    reply = ipv6 ? header->type == 129 : header->type == 0;
     id = ntohs(header->id);
     seq = ntohs(header->seq);
 
-    return dataLength - sizeof(IpHeader) - sizeof(EchoHeader);
+    return icmpLength - sizeof(EchoHeader);
 }
 
 uint16_t Echo::icmpChecksum(const char *data, int length)
@@ -514,10 +696,10 @@ uint16_t Echo::icmpChecksum(const char *data, int length)
 
 char *Echo::sendPayloadBuffer()
 {
-    return sendBuffer.data() + headerSize();
+    return sendBuffer.data() + NETWORK_HEADER_RESERVE + sizeof(EchoHeader);
 }
 
 char *Echo::receivePayloadBuffer()
 {
-    return receiveBuffer.data() + headerSize();
+    return receiveBuffer.data() + NETWORK_HEADER_RESERVE + sizeof(EchoHeader);
 }

@@ -87,7 +87,8 @@ protected:
     }; // size = 5
 
     virtual bool handleEchoData(const TunnelHeader &header, int dataLength,
-                                uint32_t realIp, bool reply, uint16_t id, uint16_t seq);
+                                const Echo::Address &realAddress, bool reply,
+                                uint16_t id, uint16_t seq);
     virtual void handleTunData(int dataLength, uint32_t sourceIp,
                                uint32_t destIp); // to echoSendPayloadBuffer
     virtual void handleTimeout();
@@ -98,7 +99,8 @@ protected:
     virtual void handleIdle();
 
     void sendEcho(const TunnelHeader::Magic &magic, TunnelHeader::Type type,
-                  int length, uint32_t realIp, bool reply, uint16_t id, uint16_t seq);
+                  int length, const Echo::Address &realAddress, bool reply,
+                  uint16_t id, uint16_t seq);
     void sendToTun(int length); // from echoReceivePayloadBuffer
 
     void setTimeout(Time delta);

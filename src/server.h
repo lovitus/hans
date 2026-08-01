@@ -98,6 +98,7 @@ protected:
         };
 
         uint32_t realIp;
+        Echo::Address realAddress;
         uint32_t tunnelIp;
         uint32_t desiredIp;
         std::string deviceId;
@@ -138,12 +139,15 @@ protected:
         time_t lastSeen;
         bool active;
         uint32_t realIp;
+        std::string realAddressText;
     };
 
     typedef std::map<std::string, Lease> LeaseMap;
     typedef std::map<uint32_t, std::string> LeaseIpMap;
 
-    virtual bool handleEchoData(const TunnelHeader &header, int dataLength, uint32_t realIp, bool reply, uint16_t id, uint16_t seq);
+    virtual bool handleEchoData(const TunnelHeader &header, int dataLength,
+                                const Echo::Address &realAddress, bool reply,
+                                uint16_t id, uint16_t seq);
     virtual void handleTunData(int dataLength, uint32_t sourceIp, uint32_t destIp);
     virtual void handleTimeout();
 
@@ -153,9 +157,11 @@ protected:
 
     void handleUnknownClient(const TunnelHeader &header, int dataLength, uint32_t realIp, uint16_t echoId, uint16_t echoSeq);
     void handleV4HandshakeInit(const TunnelHeader &header, int dataLength,
-                               uint32_t realIp, uint16_t echoId, uint16_t echoSeq);
+                               const Echo::Address &realAddress,
+                               uint16_t echoId, uint16_t echoSeq);
     void handleV4HandshakeFinish(const TunnelHeader &header, int dataLength,
-                                 uint32_t realIp, uint16_t echoId, uint16_t echoSeq);
+                                 const Echo::Address &realAddress,
+                                 uint16_t echoId, uint16_t echoSeq);
     void removeClient(ClientData *client);
 
     void sendChallenge(ClientData *client);
@@ -171,7 +177,7 @@ protected:
     bool parseTransportHeader(ClientData *client, int &dataLength,
                               TransportV3::Header &transport);
     bool openV4Packet(ClientData *client, const TunnelHeader &header,
-                      int &dataLength, uint32_t realIp);
+                      int &dataLength, const Echo::Address &realAddress);
     void sendV4RawToClient(ClientData *client, TunnelHeader::Type type,
                            const char *data, int dataLength,
                            uint16_t echoId, uint16_t echoSeq);
@@ -212,6 +218,7 @@ protected:
     SecureIdentity secureIdentity;
     uint8_t securePsk[32];
     KernelEchoGuard kernelEchoGuard;
+    KernelEchoGuard kernelEchoGuard6;
 };
 
 #endif

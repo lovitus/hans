@@ -65,7 +65,8 @@ Worker::Worker(int tunnelMtu, const std::string *deviceName, bool answerEcho,
 }
 
 void Worker::sendEcho(const TunnelHeader::Magic &magic, TunnelHeader::Type type,
-                      int length, uint32_t realIp, bool reply, uint16_t id, uint16_t seq)
+                      int length, const Echo::Address &realAddress, bool reply,
+                      uint16_t id, uint16_t seq)
 {
     if (length > payloadBufferSize())
         throw Exception("packet too big");
@@ -78,7 +79,7 @@ void Worker::sendEcho(const TunnelHeader::Magic &magic, TunnelHeader::Type type,
         cout << "sending: type " << type << ", length " << length
              << ", id " << id << ", seq " << seq << endl);
 
-    echo.send(length + sizeof(TunnelHeader), realIp, reply, id, seq);
+    echo.send(length + sizeof(TunnelHeader), realAddress, reply, id, seq);
 }
 
 void Worker::sendToTun(int length)
@@ -106,6 +107,12 @@ void Worker::run()
         FD_ZERO(&writeSet);
         int maxFd = echo.getFd();
         FD_SET(echo.getFd(), &readSet);
+        if (echo.getIpv6Fd() >= 0)
+        {
+            FD_SET(echo.getIpv6Fd(), &readSet);
+            if (echo.getIpv6Fd() > maxFd)
+                maxFd = echo.getIpv6Fd();
+        }
         if (tun.getFd() >= 0)
         {
             FD_SET(tun.getFd(), &readSet);
@@ -142,13 +149,17 @@ void Worker::run()
         now = Time::now();
 
         // icmp data
-        if (FD_ISSET(echo.getFd(), &readSet))
+        int readyEchoFd = FD_ISSET(echo.getFd(), &readSet) ? echo.getFd() :
+                          (echo.getIpv6Fd() >= 0 &&
+                           FD_ISSET(echo.getIpv6Fd(), &readSet) ?
+                           echo.getIpv6Fd() : -1);
+        if (readyEchoFd >= 0)
         {
             bool reply;
             uint16_t id, seq;
-            uint32_t ip;
+            Echo::Address address;
 
-            int dataLength = echo.receive(ip, reply, id, seq);
+            int dataLength = echo.receive(readyEchoFd, address, reply, id, seq);
             if (dataLength != -1)
             {
                 bool valid = dataLength >= sizeof(TunnelHeader);
@@ -162,13 +173,14 @@ void Worker::run()
                              << ", length " << dataLength - sizeof(TunnelHeader)
                              << ", id " << id << ", seq " << seq << endl);
 
-                    valid = handleEchoData(*header, dataLength - sizeof(TunnelHeader), ip, reply, id, seq);
+                    valid = handleEchoData(*header, dataLength - sizeof(TunnelHeader),
+                                           address, reply, id, seq);
                 }
 
                 if (!valid && !reply && answerEcho)
                 {
                     memcpy(echo.sendPayloadBuffer(), echo.receivePayloadBuffer(), dataLength);
-                    echo.send(dataLength, ip, true, id, seq);
+                    echo.send(dataLength, address, true, id, seq);
                 }
             }
         }
@@ -227,7 +239,8 @@ void Worker::dropPrivileges()
 #endif
 }
 
-bool Worker::handleEchoData(const TunnelHeader &, int, uint32_t, bool, uint16_t, uint16_t)
+bool Worker::handleEchoData(const TunnelHeader &, int, const Echo::Address &,
+                            bool, uint16_t, uint16_t)
 {
     return true;
 }

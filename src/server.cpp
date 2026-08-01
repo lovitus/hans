@@ -83,7 +83,8 @@ namespace
 Server::Server(int tunnelMtu, const string *deviceName, const string &passphrase,
                uint32_t network, bool answerEcho, uid_t uid, gid_t gid, int pollTimeout,
                const string &leaseFile, const string &identityFile)
-    : Worker(tunnelMtu, deviceName, answerEcho, uid, gid), auth(passphrase)
+    : Worker(tunnelMtu, deviceName, answerEcho, uid, gid), auth(passphrase),
+      kernelEchoGuard6("/proc/sys/net/ipv6/icmp/echo_ignore_all")
 {
     this->network = network & 0xffffff00;
     this->pollTimeout = pollTimeout;
@@ -123,6 +124,7 @@ void Server::handleUnknownClient(const TunnelHeader &header, int dataLength, uin
 {
     ClientData client;
     client.realIp = realIp;
+    client.realAddress = Echo::Address::ipv4(realIp);
     client.maxPolls = 1;
     client.protocolVersion = header.magic == Client::v3Magic ? 3 :
                              (header.magic == Client::v2Magic ? 2 : 1);
@@ -266,7 +268,8 @@ void Server::removeClient(ClientData *client)
 }
 
 void Server::handleV4HandshakeInit(const TunnelHeader &, int dataLength,
-                                   uint32_t realIp, uint16_t echoId,
+                                   const Echo::Address &realAddress,
+                                   uint16_t echoId,
                                    uint16_t echoSeq)
 {
     if (dataLength != 36 && dataLength != 37)
@@ -278,7 +281,12 @@ void Server::handleV4HandshakeInit(const TunnelHeader &, int dataLength,
     if (dataLength == 37 &&
         ((uint8_t)echoReceivePayloadBuffer()[4] &
          TransportV3::CAP_WINDOWS_ICMP_HELPER) != 0)
-        kernelEchoGuard.suppress();
+    {
+        if (realAddress.family() == AF_INET6)
+            kernelEchoGuard6.suppress();
+        else
+            kernelEchoGuard.suppress();
+    }
 
     int pending = 0;
     int pendingForAddress = 0;
@@ -288,7 +296,7 @@ void Server::handleV4HandshakeInit(const TunnelHeader &, int dataLength,
             it->state == ClientData::STATE_CHALLENGE_SENT)
         {
             ++pending;
-            if (it->realIp == realIp)
+            if (it->realAddress == realAddress)
                 ++pendingForAddress;
         }
     }
@@ -296,12 +304,13 @@ void Server::handleV4HandshakeInit(const TunnelHeader &, int dataLength,
         pendingForAddress >= MAX_PENDING_SECURE_HANDSHAKES_PER_ADDRESS)
     {
         syslog(LOG_WARNING, "secure handshake limit reached for %s",
-               Utility::formatIp(realIp).c_str());
+               realAddress.format().c_str());
         return;
     }
 
     ClientData client;
-    client.realIp = realIp;
+    client.realAddress = realAddress;
+    client.realIp = realAddress.isIpv4() ? realAddress.ipv4Value() : 0;
     client.tunnelIp = 0;
     client.desiredIp = 0;
     client.protocolVersion = 4;
@@ -340,11 +349,12 @@ void Server::handleV4HandshakeInit(const TunnelHeader &, int dataLength,
     put32(echoSendPayloadBuffer() + 4, client.peerReceiverIndex);
     memcpy(echoSendPayloadBuffer() + 8, &response[0], response.size());
     sendEcho(v4Magic, TunnelHeader::TYPE_HANDSHAKE_RESPONSE,
-             8 + response.size(), realIp, true, echoId, echoSeq);
+             8 + response.size(), realAddress, true, echoId, echoSeq);
 }
 
 void Server::handleV4HandshakeFinish(const TunnelHeader &, int dataLength,
-                                     uint32_t realIp, uint16_t echoId,
+                                     const Echo::Address &realAddress,
+                                     uint16_t echoId,
                                      uint16_t echoSeq)
 {
     if (dataLength < 72)
@@ -353,7 +363,8 @@ void Server::handleV4HandshakeFinish(const TunnelHeader &, int dataLength,
     uint32_t localIndex = get32(echoReceivePayloadBuffer() + 4);
     ClientData *client = getClientByReceiverIndex(localIndex);
     if (client == NULL || client->state != ClientData::STATE_CHALLENGE_SENT ||
-        client->peerReceiverIndex != peerIndex || client->realIp != realIp ||
+        client->peerReceiverIndex != peerIndex ||
+        client->realAddress != realAddress ||
         client->secureHandshake == NULL)
         return;
     std::vector<uint8_t> decoded;
@@ -364,7 +375,7 @@ void Server::handleV4HandshakeFinish(const TunnelHeader &, int dataLength,
          decoded.size() != sizeof(ClientConnectDataV3) + 2))
     {
         syslog(LOG_WARNING, "secure authentication failed for %s",
-               Utility::formatIp(realIp).c_str());
+               realAddress.format().c_str());
         removeClient(client);
         return;
     }
@@ -402,7 +413,12 @@ void Server::handleV4HandshakeFinish(const TunnelHeader &, int dataLength,
     if (!client->autoPoll && client->maxPolls == 0)
         client->transportMode = TransportV3::MODE_DIRECT;
     if (connectData.capabilities & TransportV3::CAP_WINDOWS_ICMP_HELPER)
-        kernelEchoGuard.suppress();
+    {
+        if (client->realAddress.family() == AF_INET6)
+            kernelEchoGuard6.suppress();
+        else
+            kernelEchoGuard.suppress();
+    }
 
     ClientData *oldClient = getClientByDeviceId(client->deviceId, client);
     if (oldClient != NULL)
@@ -435,7 +451,7 @@ void Server::handleV4HandshakeFinish(const TunnelHeader &, int dataLength,
     client->state = ClientData::STATE_ESTABLISHED;
     updateLease(client, true);
     syslog(LOG_INFO, "secure protocol v4 connection established to %s (device %s)",
-           Utility::formatIp(realIp).c_str(), client->deviceId.c_str());
+           realAddress.format().c_str(), client->deviceId.c_str());
 }
 
 void Server::checkChallenge(ClientData *client, int length)
@@ -500,7 +516,9 @@ void Server::sendReset(ClientData *client)
     sendEchoToClient(client, TunnelHeader::TYPE_RESET_CONNECTION, 0);
 }
 
-bool Server::handleEchoData(const TunnelHeader &header, int dataLength, uint32_t realIp, bool reply, uint16_t id, uint16_t seq)
+bool Server::handleEchoData(const TunnelHeader &header, int dataLength,
+                            const Echo::Address &realAddress, bool reply,
+                            uint16_t id, uint16_t seq)
 {
     if (reply)
         return false;
@@ -509,12 +527,12 @@ bool Server::handleEchoData(const TunnelHeader &header, int dataLength, uint32_t
     {
         if (header.type == TunnelHeader::TYPE_HANDSHAKE_INIT)
         {
-            handleV4HandshakeInit(header, dataLength, realIp, id, seq);
+            handleV4HandshakeInit(header, dataLength, realAddress, id, seq);
             return true;
         }
         if (header.type == TunnelHeader::TYPE_HANDSHAKE_FINISH)
         {
-            handleV4HandshakeFinish(header, dataLength, realIp, id, seq);
+            handleV4HandshakeFinish(header, dataLength, realAddress, id, seq);
             return true;
         }
         if (dataLength < 4)
@@ -522,7 +540,7 @@ bool Server::handleEchoData(const TunnelHeader &header, int dataLength, uint32_t
         ClientData *secureClient = getClientByReceiverIndex(
             get32(echoReceivePayloadBuffer()));
         if (secureClient == NULL || secureClient->state != ClientData::STATE_ESTABLISHED ||
-            !openV4Packet(secureClient, header, dataLength, realIp))
+            !openV4Packet(secureClient, header, dataLength, realAddress))
             return true;
         ClientData *client = secureClient;
         TransportV3::Header transport;
@@ -571,7 +589,7 @@ bool Server::handleEchoData(const TunnelHeader &header, int dataLength, uint32_t
                     sendV3ToClient(client, TunnelHeader::TYPE_MODE_ACK, 1,
                                    TransportV3::FLAG_CONTROL, true, id, seq);
                     syslog(LOG_INFO, "client %s transport mode is now %s",
-                           Utility::formatIp(realIp).c_str(),
+                           realAddress.format().c_str(),
                            client->transportMode == TransportV3::MODE_DIRECT ?
                            "direct" : "adaptive-credit");
                 }
@@ -583,7 +601,7 @@ bool Server::handleEchoData(const TunnelHeader &header, int dataLength, uint32_t
                     client->transportMode = TransportV3::MODE_CREDIT;
                     client->directUnacked.clear();
                     syslog(LOG_WARNING, "direct reply acknowledgements stalled for %s; falling back to adaptive credits",
-                           Utility::formatIp(realIp).c_str());
+                           realAddress.format().c_str());
                     echoSendPayloadBuffer()[0] = TransportV3::MODE_CREDIT;
                     sendV3ToClient(client, TunnelHeader::TYPE_MODE_ACK, 1,
                                    TransportV3::FLAG_CONTROL, true, id, seq);
@@ -600,6 +618,11 @@ bool Server::handleEchoData(const TunnelHeader &header, int dataLength, uint32_t
     if (header.magic != Client::magic && header.magic != Client::v2Magic &&
         header.magic != Client::v3Magic)
         return false;
+
+    // Legacy protocols use the IPv4 source address as their session key.
+    if (!realAddress.isIpv4())
+        return false;
+    uint32_t realIp = realAddress.ipv4Value();
 
     ClientData *client = getClientByRealIp(realIp);
     if (client == NULL)
@@ -846,6 +869,7 @@ void Server::pollReceived(ClientData *client, uint16_t echoId, uint16_t echoSeq,
         {
             lease->second.lastSeen = time(NULL);
             lease->second.realIp = client->realIp;
+            lease->second.realAddressText = client->realAddress.format();
         }
     }
 }
@@ -867,7 +891,7 @@ void Server::sendEchoToClient(ClientData *client, TunnelHeader::Type type, int d
             (client->protocolVersion == 3 ? v3Magic :
             (client->protocolVersion == 2 ? v2Magic : magic));
         sendEcho(responseMagic, type, dataLength,
-                 client->realIp, true, client->pollIds.front().id,
+                 client->realAddress, true, client->pollIds.front().id,
                  client->pollIds.front().seq);
         return;
     }
@@ -883,7 +907,7 @@ void Server::sendEchoToClient(ClientData *client, TunnelHeader::Type type, int d
             (client->protocolVersion == 3 ? v3Magic :
             (client->protocolVersion == 2 ? v2Magic : magic));
         sendEcho(responseMagic, type, dataLength,
-                 client->realIp, true, echoId.id, echoId.seq);
+                 client->realAddress, true, echoId.id, echoId.seq);
         return;
     }
 
@@ -984,7 +1008,7 @@ void Server::sendV3ToClient(ClientData *client, TunnelHeader::Type type,
     }
 
     sendEcho(*wireMagic, type, wireLength,
-             client->realIp, true, target.id, target.seq);
+             client->realAddress, true, target.id, target.seq);
 
     if (!forceEcho && client->transportMode == TransportV3::MODE_DIRECT &&
         type == TunnelHeader::TYPE_DATA)
@@ -992,7 +1016,7 @@ void Server::sendV3ToClient(ClientData *client, TunnelHeader::Type type,
 }
 
 bool Server::openV4Packet(ClientData *client, const TunnelHeader &header,
-                          int &dataLength, uint32_t realIp)
+                          int &dataLength, const Echo::Address &realAddress)
 {
     std::vector<uint8_t> plain;
     if (!client->secureTransport.open((const uint8_t *)&header, sizeof(header),
@@ -1005,12 +1029,13 @@ bool Server::openV4Packet(ClientData *client, const TunnelHeader &header,
 
     // The receiver index and AEAD authenticate this peer, so a changed source
     // address is safe to adopt after (and only after) successful decryption.
-    if (client->realIp != realIp)
+    if (client->realAddress != realAddress)
     {
         syslog(LOG_INFO, "secure peer %s roamed from %s to %s",
-               client->deviceId.c_str(), Utility::formatIp(client->realIp).c_str(),
-               Utility::formatIp(realIp).c_str());
-        client->realIp = realIp;
+               client->deviceId.c_str(), client->realAddress.format().c_str(),
+               realAddress.format().c_str());
+        client->realAddress = realAddress;
+        client->realIp = realAddress.isIpv4() ? realAddress.ipv4Value() : 0;
         updateLease(client, true);
     }
     return true;
@@ -1028,7 +1053,7 @@ void Server::sendV4RawToClient(ClientData *client, TunnelHeader::Type type,
                                       (const uint8_t *)data, dataLength, packet))
         return;
     memcpy(echoSendPayloadBuffer(), &packet[0], packet.size());
-    sendEcho(v4Magic, type, packet.size(), client->realIp, true,
+    sendEcho(v4Magic, type, packet.size(), client->realAddress, true,
              echoId, echoSeq);
 }
 
@@ -1200,6 +1225,7 @@ void Server::updateLease(ClientData *client, bool active)
     lease.lastSeen = time(NULL);
     lease.active = active;
     lease.realIp = client->realIp;
+    lease.realAddressText = client->realAddress.format();
     leaseIpMap[lease.tunnelIp] = lease.deviceId;
     saveLeases();
 }
@@ -1214,8 +1240,8 @@ void Server::loadLeases()
     uint32_t tunnelIp;
     long lastSeen;
     int active;
-    uint32_t realIp;
-    while (input >> deviceId >> tunnelIp >> lastSeen >> active >> realIp)
+    string realAddressText;
+    while (input >> deviceId >> tunnelIp >> lastSeen >> active >> realAddressText)
     {
         if (!Utility::isDeviceId(deviceId) ||
             tunnelIp <= network + 1 || tunnelIp >= network + 255)
@@ -1226,7 +1252,19 @@ void Server::loadLeases()
         lease.tunnelIp = tunnelIp;
         lease.lastSeen = (time_t)lastSeen;
         lease.active = false;
-        lease.realIp = realIp;
+        char *end = NULL;
+        unsigned long legacyRealIp = strtoul(realAddressText.c_str(), &end, 10);
+        if (end != realAddressText.c_str() && *end == '\0' &&
+            legacyRealIp <= 0xfffffffful)
+        {
+            lease.realIp = (uint32_t)legacyRealIp;
+            lease.realAddressText = Utility::formatIp(lease.realIp);
+        }
+        else
+        {
+            lease.realIp = 0;
+            lease.realAddressText = realAddressText;
+        }
         leases[lease.deviceId] = lease;
         leaseIpMap[lease.tunnelIp] = lease.deviceId;
     }
@@ -1244,7 +1282,9 @@ void Server::saveLeases()
         const Lease &lease = it->second;
         output << lease.deviceId << ' ' << lease.tunnelIp << ' '
                << (long)lease.lastSeen << ' ' << (lease.active ? 1 : 0)
-               << ' ' << lease.realIp << '\n';
+               << ' ' << (lease.realAddressText.empty() ?
+                           Utility::formatIp(lease.realIp) :
+                           lease.realAddressText) << '\n';
     }
 
     string data = output.str();
@@ -1282,7 +1322,7 @@ int Server::listPeers(const string &leaseFile, bool json)
     else
         cout << std::left << std::setw(34) << "DEVICE ID"
              << std::setw(17) << "TUNNEL IP"
-             << std::setw(17) << "REAL IP"
+             << std::setw(41) << "REAL IP"
              << std::setw(10) << "STATE"
              << "LAST SEEN" << endl;
 
@@ -1290,10 +1330,15 @@ int Server::listPeers(const string &leaseFile, bool json)
     uint32_t tunnelIp;
     long lastSeen;
     int active;
-    uint32_t realIp;
+    string realAddressText;
     bool first = true;
-    while (input >> deviceId >> tunnelIp >> lastSeen >> active >> realIp)
+    while (input >> deviceId >> tunnelIp >> lastSeen >> active >> realAddressText)
     {
+        char *end = NULL;
+        unsigned long legacyRealIp = strtoul(realAddressText.c_str(), &end, 10);
+        if (end != realAddressText.c_str() && *end == '\0' &&
+            legacyRealIp <= 0xfffffffful)
+            realAddressText = Utility::formatIp((uint32_t)legacyRealIp);
         char formattedTime[32] = "-";
         time_t timestamp = (time_t)lastSeen;
         struct tm *local = localtime(&timestamp);
@@ -1305,7 +1350,7 @@ int Server::listPeers(const string &leaseFile, bool json)
             if (!first) cout << ',';
             cout << "{\"device_id\":\"" << deviceId
                  << "\",\"tunnel_ip\":\"" << Utility::formatIp(tunnelIp)
-                 << "\",\"real_ip\":\"" << Utility::formatIp(realIp)
+                 << "\",\"real_ip\":\"" << realAddressText
                  << "\",\"online\":" << (active ? "true" : "false")
                  << ",\"last_seen\":" << lastSeen << '}';
             first = false;
@@ -1313,7 +1358,7 @@ int Server::listPeers(const string &leaseFile, bool json)
         else
             cout << std::left << std::setw(34) << deviceId
                  << std::setw(17) << Utility::formatIp(tunnelIp)
-                 << std::setw(17) << Utility::formatIp(realIp)
+                 << std::setw(41) << realAddressText
                  << std::setw(10) << (active ? "online" : "offline")
                  << formattedTime << endl;
     }

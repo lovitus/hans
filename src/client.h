@@ -33,7 +33,8 @@ class Client : public Worker, public UserspaceNetworkObserver
 {
 
 public:
-    Client(int tunnelMtu, const std::string *deviceName, uint32_t serverIp,
+    Client(int tunnelMtu, const std::string *deviceName,
+           const Echo::Address &serverAddress,
            int maxPolls, const std::string &passphrase, uid_t uid, gid_t gid,
            bool changeEchoId, bool changeEchoSeq, uint32_t desiredIp,
            const std::string &deviceId, bool userspace = false,
@@ -61,7 +62,9 @@ protected:
         STATE_ESTABLISHED
     };
 
-    virtual bool handleEchoData(const TunnelHeader &header, int dataLength, uint32_t realIp, bool reply, uint16_t id, uint16_t seq);
+    virtual bool handleEchoData(const TunnelHeader &header, int dataLength,
+                                const Echo::Address &realAddress, bool reply,
+                                uint16_t id, uint16_t seq);
     virtual void handleTunData(int dataLength, uint32_t sourceIp, uint32_t destIp);
     virtual void handleTimeout();
     virtual int addFileDescriptors(fd_set &readSet, fd_set &writeSet,
@@ -95,7 +98,7 @@ protected:
 
     Auth auth;
 
-    uint32_t serverIp;
+    Echo::Address serverAddress;
     uint32_t clientIp;
     uint32_t desiredIp;
     std::string deviceId;

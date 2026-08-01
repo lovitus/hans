@@ -7,6 +7,8 @@ Release 1.5 (August 2026)
 * Add RFC 1929 SOCKS5 authentication with a private password file
 * Add JSON peer listing and portable ICMP/entropy diagnostics
 * Add complete v4 framing, tamper, wrong-PSK, replay, and package tests
+* Add IPv6 server-name/literal resolution and ICMPv6 as an outer carrier;
+  the virtual VPN network remains IPv4
 
 Release 1.4 (July 2026)
 -----------------------
