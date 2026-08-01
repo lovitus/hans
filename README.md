@@ -264,6 +264,13 @@ bridge to `127.0.0.1:N`. One internal fallback listener handles this without
 opening 65535 sockets or spawning `socat`; bridges exist only for active
 connections. This option is intentionally not enabled by default.
 
+The embedded TCP stack uses scaled, high-bandwidth windows in both directions.
+Window capacity is allocated only as traffic is queued, so an idle userspace
+connection does not reserve the full bandwidth-delay product. This matters on
+paths with tens of milliseconds of latency, where a traditional 64 KiB send
+buffer otherwise limits a single TCP stream even when the ICMP carrier has
+substantial spare capacity.
+
 The SOCKS listener defaults to `127.0.0.1`. For a shared listener, enable
 dependency-free RFC 1929 authentication and keep the password off the command
 line:

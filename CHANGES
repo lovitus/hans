@@ -14,6 +14,9 @@ Release 1.5 (August 2026)
 * Restore encrypted data-plane performance with in-place AEAD, contiguous ACK
   tracking, optimized release builds, and single-threaded opportunistic Linux
   packet batching
+* Raise the userspace TCP send and receive windows for high-bandwidth,
+  higher-latency VPN paths instead of capping throughput at one small window
+  per round trip
 
 Release 1.4 (July 2026)
 -----------------------

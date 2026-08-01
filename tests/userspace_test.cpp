@@ -1,5 +1,9 @@
 #include "../src/userspace.h"
 
+extern "C" {
+#include "lwip/opt.h"
+}
+
 #include <arpa/inet.h>
 #include <iostream>
 #include <string>
@@ -21,6 +25,16 @@ namespace
 
 int main()
 {
+    expect(TCP_WND >= 2 * 1024 * 1024,
+           "receive window supports high-bandwidth VPN paths");
+    expect(TCP_SND_BUF >= 2 * 1024 * 1024,
+           "send buffer supports high-bandwidth VPN paths");
+    expect(TCP_SND_QUEUELEN >=
+           2 * ((TCP_SND_BUF + TCP_MSS - 1) / TCP_MSS),
+           "send queue can hold the configured send buffer");
+    expect((TCP_WND >> TCP_RCV_SCALE) <= 65535,
+           "scaled receive window fits the TCP option");
+
     std::vector<SharePort> ports;
     std::string error;
     expect(UserspaceNetwork::parseSharePorts("22,80,2222=127.0.0.1:22,8080=192.168.1.20:80",
