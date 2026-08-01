@@ -33,11 +33,12 @@ echo "=================================================="
 
 # ---------------------------------------------------------------------------
 # 1+2+3. Run the binary, capture version + help/usage text.
-# hans has no explicit --version/--help flag: any invalid invocation (e.g. no
-# arguments) prints "Hans - IP over ICMP version X.Y" followed by full usage.
+# --help prints "Hans - IP over ICMP version X.Y" followed by full usage and
+# exits successfully on every packaged target.
 # ---------------------------------------------------------------------------
 USAGE_OUT="$(mktemp 2>/dev/null || echo /tmp/hans_usage_$$.txt)"
-"$BIN" >"$USAGE_OUT" 2>&1
+"$BIN" --help >"$USAGE_OUT" 2>&1
+HELP_EXIT=$?
 UOUT="$(cat "$USAGE_OUT")"
 
 echo "---- program output ----"
@@ -58,7 +59,7 @@ if [ "$VERSION_OK" -ne 0 ]; then
 fi
 echo "OK   [$LABEL]: version check passed"
 
-if [ "$HELP_OK" -ne 0 ]; then
+if [ "$HELP_EXIT" -ne 0 ] || [ "$HELP_OK" -ne 0 ]; then
     echo "FAIL [$LABEL]: could not read help/usage information from binary output"
     exit 1
 fi

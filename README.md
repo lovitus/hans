@@ -468,11 +468,18 @@ sudo systemctl enable --now hans-server
 ## Full CLI reference
 
 ```
-RUN AS CLIENT
+RUN AS CLIENT (TUN/TAP, DEFAULT)
   hans -c server [-fv] [-p passphrase] [-u user] [-d tun_device]
        [-m reference_mtu] [-w auto|polls] [--device-id id]
-       [--device-id-file path] [--feature userspace]
+       [--device-id-file path]
+       [--identity-file path] [--server-fingerprint hex] [--require-v4]
+
+RUN AS USERSPACE CLIENT (NO TUN/TAP)
+  hans -c server [-fv] [-p passphrase] [-u user]
+       [-m reference_mtu] [-w auto|polls] [--device-id id]
+       [--device-id-file path] --feature userspace
        [--socks5 IPv4:port] [--shareports mappings] [--allports]
+       [--socks5-user name] [--socks5-password-file path]
        [--identity-file path] [--server-fingerprint hex] [--require-v4]
 
 RUN AS SERVER (linux only)
@@ -508,19 +515,23 @@ ARGUMENTS
   -w auto|polls Adaptive credits/direct probing by default; a number forces a fixed window.
   -i            Change echo id on every echo request (client only).
   -q            Change echo sequence number on every echo request (client only).
+USERSPACE CLIENT OPTIONS (require --feature userspace)
   --feature userspace
                 Run the client without TUN/TAP using the embedded TCP/IP stack.
   --socks5 ip:port
-                Listen for SOCKS5 TCP CONNECT and UDP ASSOCIATE requests.
+                Expose a local SOCKS5 TCP/UDP gateway to VPN peers; this is not
+                a SOCKS service for normal TUN/TAP mode.
+  --socks5-user name
+                Require RFC 1929 username/password authentication.
+  --socks5-password-file path
+                Read the SOCKS5 password from a private 0600 file.
   --shareports mappings
                 Share VPN ports; plain N maps to 127.0.0.1:N, while
                 listen=target-ip:target-port specifies an explicit target.
   --allports    Share every otherwise-unmapped TCP port to 127.0.0.1:same-port.
                 Explicit --shareports mappings take precedence.
-  --socks5-user name
-                Require RFC 1929 username/password authentication.
-  --socks5-password-file path
-                Read the SOCKS5 password from a private 0600 file.
+
+SECURE TRANSPORT OPTIONS
   --identity-file path
                 Load/create the Noise static private key at this path.
   --passphrase-file path
@@ -528,6 +539,7 @@ ARGUMENTS
   --server-fingerprint hex
                 Pin the expected server Noise fingerprint.
   --require-v4  Refuse fallback to an unencrypted legacy protocol.
+  -h, --help    Show this help and exit.
   --json        Emit JSON for --list-peers or --doctor.
   --doctor      Check secure randomness and ICMP transport access.
   -f            Run in foreground.

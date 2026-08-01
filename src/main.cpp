@@ -92,11 +92,17 @@ static void usage()
 {
     std::cerr <<
         "Hans - IP over ICMP version 1.5\n\n"
-        "RUN AS CLIENT\n"
+        "RUN AS CLIENT (TUN/TAP, DEFAULT)\n"
         "  hans -c server [-fv] [-p passphrase] [-u user] [-d tun_device]\n"
         "       [-m reference_mtu] [-w auto|polls] [--device-id id]\n"
-        "       [--device-id-file path] [--feature userspace]\n"
+        "       [--device-id-file path]\n"
+        "       [--identity-file path] [--server-fingerprint hex] [--require-v4]\n\n"
+        "RUN AS USERSPACE CLIENT (NO TUN/TAP)\n"
+        "  hans -c server [-fv] [-p passphrase] [-u user]\n"
+        "       [-m reference_mtu] [-w auto|polls] [--device-id id]\n"
+        "       [--device-id-file path] --feature userspace\n"
         "       [--socks5 IPv4:port] [--shareports mappings] [--allports]\n"
+        "       [--socks5-user name] [--socks5-password-file path]\n"
         "       [--identity-file path] [--server-fingerprint hex] [--require-v4]\n\n"
         "RUN AS SERVER (linux only)\n"
         "  hans -s network [-fvr] [-p passphrase] [-u user] [-d tun_device]\n"
@@ -137,15 +143,22 @@ static void usage()
         "                routers. May impact performance with others.\n"
         "  -q            Change echo sequence number on every echo request. May help with\n"
         "                buggy routers. May impact performance with others.\n"
+        "\nUSERSPACE CLIENT OPTIONS (require --feature userspace)\n"
         "  --feature userspace\n"
         "                Run the client without TUN/TAP and use the embedded TCP/IP stack.\n"
         "  --socks5 ip:port\n"
-        "                Listen for SOCKS5 CONNECT and UDP ASSOCIATE requests.\n"
+        "                Expose a local SOCKS5 CONNECT/UDP gateway to VPN peers.\n"
+        "                This is not a SOCKS service for normal TUN/TAP mode.\n"
+        "  --socks5-user name\n"
+        "                Require RFC 1929 username/password authentication.\n"
+        "  --socks5-password-file path\n"
+        "                Read the SOCKS5 password from a private file.\n"
         "  --shareports mappings\n"
         "                Share VPN ports. A plain port maps to 127.0.0.1:same-port;\n"
         "                use listen-port=target-ip:target-port to override it.\n"
         "  --allports    Share every otherwise-unmapped TCP port to\n"
         "                127.0.0.1:same-port. Explicit --shareports win.\n"
+        "\nSECURE TRANSPORT OPTIONS\n"
         "  --identity-file path\n"
         "                Load/create the Noise static key at this path.\n"
         "  --show-identity\n"
@@ -153,10 +166,7 @@ static void usage()
         "  --server-fingerprint hex\n"
         "                Require the server Noise key to match this fingerprint.\n"
         "  --require-v4  Refuse unauthenticated downgrade to legacy protocols.\n"
-        "  --socks5-user name\n"
-        "                Require RFC 1929 username/password authentication.\n"
-        "  --socks5-password-file path\n"
-        "                Read the SOCKS5 password from a private file.\n"
+        "  -h, --help    Show this help and exit.\n"
         "  -f            Run in foreground.\n"
         "  -v            Print debug information.\n";
 }
@@ -210,6 +220,7 @@ int main(int argc, char *argv[])
            OPTION_SOCKS5_USER, OPTION_SOCKS5_PASSWORD_FILE, OPTION_JSON,
            OPTION_DOCTOR, OPTION_PASSPHRASE_FILE };
     static struct option longOptions[] = {
+        {"help", no_argument, NULL, 'h'},
         {"device-id", required_argument, NULL, 'I'},
         {"device-id-file", required_argument, NULL, 'k'},
         {"lease-file", required_argument, NULL, 'j'},
@@ -232,10 +243,13 @@ int main(int argc, char *argv[])
     };
 
     int c;
-    while ((c = getopt_long(argc, argv, "fru:d:p:s:c:m:w:qiva:I:k:j:lo",
+    while ((c = getopt_long(argc, argv, "hfru:d:p:s:c:m:w:qiva:I:k:j:lo",
                             longOptions, NULL)) != -1)
     {
         switch(c) {
+            case 'h':
+                usage();
+                return 0;
             case 'f':
                 foreground = true;
                 break;
