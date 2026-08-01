@@ -834,6 +834,29 @@ public:
         }
     }
 
+    void failHostConnection(Connection *connection)
+    {
+        /* A fatal host-socket error means queued bytes can never drain.  If we
+         * leave the lwIP side half-closed, lwIP may later retire the PCB after
+         * TIME_WAIT while this bridge still holds its pointer. */
+        abortTcp(connection);
+        if (connection->fd >= 0)
+        {
+            close(connection->fd);
+            connection->fd = -1;
+        }
+        connection->hostConnecting = false;
+        connection->hostReadClosed = true;
+        connection->controlIn.clear();
+        connection->controlOut.clear();
+        connection->networkOut.clear();
+        connection->upstream.clear();
+        connection->controlOffset = 0;
+        connection->networkOffset = 0;
+        connection->upstreamOffset = 0;
+        connection->closeAfterWrite = true;
+    }
+
     void writeHost(Connection *connection)
     {
         if (connection->hostConnecting)
@@ -843,8 +866,7 @@ public:
             if (getsockopt(connection->fd, SOL_SOCKET, SO_ERROR, &error, &length) != 0 ||
                 error != 0)
             {
-                connection->closeAfterWrite = true;
-                abortTcp(connection);
+                failHostConnection(connection);
                 return;
             }
             connection->hostConnecting = false;
@@ -862,8 +884,9 @@ public:
                              (size_t)sent);
             else
             {
-                if (sent < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)
-                    connection->closeAfterWrite = true;
+                if (sent == 0 ||
+                    (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR))
+                    failHostConnection(connection);
                 return;
             }
         }
@@ -895,8 +918,9 @@ public:
             }
             else
             {
-                if (sent < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)
-                    connection->closeAfterWrite = true;
+                if (sent == 0 ||
+                    (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR))
+                    failHostConnection(connection);
                 return;
             }
         }

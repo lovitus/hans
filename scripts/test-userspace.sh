@@ -17,7 +17,8 @@ client_log="$work/client.log"
 cleanup() {
     kill "${client_pid:-}" "${server_pid:-}" "${server_http_pid:-}" \
          "${client2_pid:-}" "${client_http_pid:-}" "${allports_http_pid:-}" \
-         "${large_sink_pid:-}" "${udp_pid:-}" 2>/dev/null || true
+         "${large_sink_pid:-}" "${large_source_pid:-}" "${udp_pid:-}" \
+         2>/dev/null || true
     ip netns delete "$client_ns" 2>/dev/null || true
     ip netns delete "$server_ns" 2>/dev/null || true
 }
@@ -100,6 +101,19 @@ while True:
 c.sendall(str(total).encode("ascii"));c.close();s.close()' \
     >"$work/large-sink.log" 2>&1 &
 large_sink_pid=$!
+ip netns exec "$server_ns" python3 -c \
+    'import socket
+s=socket.socket();s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1);s.bind(("10.77.88.1",18089));s.listen(16)
+while True:
+ c,_=s.accept()
+ try:
+  c.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 1073741824\r\nConnection: close\r\n\r\n")
+  block=b"x"*65536
+  while True: c.sendall(block)
+ except OSError: pass
+ finally: c.close()' \
+    >"$work/large-source.log" 2>&1 &
+large_source_pid=$!
 ip netns exec "$server_ns" python3 -c \
     'import socket;s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM);s.bind(("10.77.88.1",18083));exec("while True:\n d,a=s.recvfrom(65535)\n s.sendto(d,a)")' \
     >"$work/server-udp.log" 2>&1 &
@@ -260,6 +274,26 @@ for n in 1 2 3 4; do
     cmp "$BINABS" "$work/mixed-allports-$n"
     cmp "$BINABS" "$work/mixed-peer-$n"
 done
+
+# Abort several downloads while the bridge still has data queued for their
+# host sockets. Those queues must be discarded together with their lwIP PCBs;
+# retaining a PCB until TIME_WAIT used to cause a delayed tcp_output crash.
+abort_pids=""
+for n in 1 2 3 4; do
+    ip netns exec "$client_ns" curl --fail --silent --show-error --max-time 1 \
+        --socks5-hostname 127.0.0.1:18080 \
+        --proxy-user hans:userspace-secret \
+        http://10.77.88.1:18089/ -o "$work/aborted-socks-$n" &
+    abort_pids="$abort_pids $!"
+done
+for abort_pid in $abort_pids; do
+    if wait "$abort_pid"; then
+        echo "large SOCKS download unexpectedly completed" >&2
+        exit 1
+    fi
+done
+sleep 2
+kill -0 "$client_pid"
 
 kill -0 "$server_pid"
 kill -0 "$client_pid"
