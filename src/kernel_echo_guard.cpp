@@ -8,7 +8,7 @@
 #include <unistd.h>
 
 KernelEchoGuard::KernelEchoGuard(const char *path)
-    : fd(-1), originalValue(0), active(false), changed(false)
+    : fd(-1), originalValue(0), active(false), changed(false), users(0)
 {
 #ifdef __linux__
     if (path == 0)
@@ -69,7 +69,10 @@ bool KernelEchoGuard::writeValue(int value)
 bool KernelEchoGuard::suppress()
 {
     if (active)
+    {
+        ++users;
         return true;
+    }
     if (!readValue(originalValue))
     {
         syslog(LOG_WARNING, "Windows userspace client detected, but runtime kernel echo suppression is unavailable: %s",
@@ -88,6 +91,34 @@ bool KernelEchoGuard::suppress()
         changed = true;
     }
     active = true;
+    users = 1;
     syslog(LOG_INFO, "temporarily suppressed kernel ICMP echo replies for Windows userspace clients");
     return true;
+}
+
+void KernelEchoGuard::release()
+{
+    if (!active || users == 0)
+        return;
+    if (--users != 0)
+        return;
+
+    if (changed)
+    {
+        int currentValue = -1;
+        // As in the destructor, preserve any administrator change made after
+        // Hans acquired the setting.
+        if (readValue(currentValue) && currentValue == 1)
+        {
+            if (writeValue(originalValue))
+                syslog(LOG_INFO, "restored kernel ICMP echo reply setting to %d",
+                       originalValue);
+            else
+                syslog(LOG_WARNING,
+                       "could not restore kernel ICMP echo reply setting: %s",
+                       strerror(errno));
+        }
+    }
+    active = false;
+    changed = false;
 }

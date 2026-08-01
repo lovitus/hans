@@ -8,6 +8,7 @@ public:
     ~KernelEchoGuard();
 
     bool suppress();
+    void release();
 
 private:
     bool readValue(int &value);
@@ -17,6 +18,7 @@ private:
     int originalValue;
     bool active;
     bool changed;
+    unsigned int users;
 };
 
 #endif

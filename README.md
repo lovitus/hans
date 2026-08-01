@@ -283,12 +283,14 @@ permission error when neither a ping socket nor a raw socket is available.
 When a Windows userspace client connects to a Linux server, the Windows IP
 Helper API completes an echo operation on the first matching reply. The
 server kernel's ordinary ping reply can otherwise win the race against the
-Hans reply. A current client advertises its IP Helper path in the v3
-handshake. The Linux server then changes
-`/proc/sys/net/ipv4/icmp_echo_ignore_all` to `1` for the lifetime of the server
-process, and restores the value it observed when it exits normally. The
-setting is runtime-only but applies to the whole network namespace; Hans does
-not write `sysctl.conf` or any other persistent configuration.
+Hans reply. A current client advertises its IP Helper path in the first
+handshake message. The Linux server then changes the matching runtime knob—
+`/proc/sys/net/ipv4/icmp_echo_ignore_all` or
+`/proc/sys/net/ipv6/icmp/echo_ignore_all`—to `1`. It reference-counts these
+settings separately and restores the value it observed when the last relevant
+Windows userspace peer disconnects or when the server exits normally. The
+setting applies to the whole network namespace; Hans does not write
+`sysctl.conf` or any other persistent configuration.
 
 The first request can already have received the ordinary kernel reply, so the
 automatic handshake may take one retry. If the server lacks permission to
@@ -304,20 +306,12 @@ terminated with `SIGKILL`, or a process killed after the administrator changes
 the value again, cannot safely restore it automatically; inspect and restore
 the setting manually in those cases.
 
-Traffic between two tunnel clients is routed through the server's Hans
-interface. Linux servers therefore need IPv4 forwarding, and a restrictive
-`FORWARD` policy needs a narrow same-interface allow rule (replace the network
-and interface name as appropriate):
-
-```sh
-sudo sysctl -w net.ipv4.ip_forward=1
-sudo iptables -A FORWARD -i hans1 -o hans1 \
-  -s 10.0.0.0/24 -d 10.0.0.0/24 -j ACCEPT
-```
-
-This is required for normal peer-to-peer traffic as well as userspace SOCKS
-and shared-port traffic. It is not needed when only a client and the server's
-own tunnel address communicate.
+Traffic between authenticated tunnel peers is switched inside Hans and does
+not traverse the Linux `FORWARD` chain. Normal peer-to-peer, userspace SOCKS,
+and shared-port traffic therefore work even when `net.ipv4.ip_forward=0` or
+the host firewall has a default-drop forwarding policy. Forwarding/NAT is
+still an explicit administrator choice when routing traffic beyond the Hans
+VPN, as described below.
 
 ---
 

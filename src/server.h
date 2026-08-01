@@ -105,6 +105,7 @@ protected:
         int protocolVersion;
         int capabilities;
         bool autoPoll;
+        int kernelEchoFamily;
         uint8_t transportMode;
         uint32_t sessionId;
         uint32_t localReceiverIndex;

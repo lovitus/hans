@@ -131,6 +131,7 @@ void Server::handleUnknownClient(const TunnelHeader &header, int dataLength, uin
                              (header.magic == Client::v2Magic ? 2 : 1);
     client.capabilities = 0;
     client.autoPoll = false;
+    client.kernelEchoFamily = AF_UNSPEC;
     client.transportMode = TransportV3::MODE_CREDIT;
     client.sessionId = 0;
     client.localReceiverIndex = 0;
@@ -180,9 +181,6 @@ void Server::handleUnknownClient(const TunnelHeader &header, int dataLength, uin
     {
         ClientConnectDataV3 *connectDataV3 =
             (ClientConnectDataV3 *)echoReceivePayloadBuffer();
-        if (connectDataV3->capabilities &
-            TransportV3::CAP_WINDOWS_ICMP_HELPER)
-            kernelEchoGuard.suppress();
         client.capabilities = connectDataV3->capabilities &
                               TransportV3::ALL_CAPABILITIES;
         client.autoPoll =
@@ -212,6 +210,9 @@ void Server::handleUnknownClient(const TunnelHeader &header, int dataLength, uin
 
     if (client.tunnelIp != 0 || replacingDevice)
     {
+        if ((client.capabilities & TransportV3::CAP_WINDOWS_ICMP_HELPER) != 0 &&
+            kernelEchoGuard.suppress())
+            client.kernelEchoFamily = AF_INET;
         client.challenge = auth.generateChallenge(CHALLENGE_SIZE);
         sendChallenge(&client);
 
@@ -263,6 +264,10 @@ void Server::removeClient(ClientData *client)
     else
         clientReceiverIndexMap.erase(client->localReceiverIndex);
     clientTunnelIpMap.erase(client->tunnelIp);
+    if (client->kernelEchoFamily == AF_INET6)
+        kernelEchoGuard6.release();
+    else if (client->kernelEchoFamily == AF_INET)
+        kernelEchoGuard.release();
     delete client->secureHandshake;
     client->secureHandshake = NULL;
     clientList.erase(it);
@@ -279,15 +284,9 @@ void Server::handleV4HandshakeInit(const TunnelHeader &, int dataLength,
     if (peerIndex == 0)
         return;
     const int noiseOffset = dataLength == 37 ? 5 : 4;
-    if (dataLength == 37 &&
-        ((uint8_t)echoReceivePayloadBuffer()[4] &
-         TransportV3::CAP_WINDOWS_ICMP_HELPER) != 0)
-    {
-        if (realAddress.family() == AF_INET6)
-            kernelEchoGuard6.suppress();
-        else
-            kernelEchoGuard.suppress();
-    }
+    const bool windowsHelperHint = dataLength == 37 &&
+        (((uint8_t)echoReceivePayloadBuffer()[4] &
+          TransportV3::CAP_WINDOWS_ICMP_HELPER) != 0);
 
     int pending = 0;
     int pendingForAddress = 0;
@@ -317,6 +316,7 @@ void Server::handleV4HandshakeInit(const TunnelHeader &, int dataLength,
     client.protocolVersion = 4;
     client.capabilities = 0;
     client.autoPoll = false;
+    client.kernelEchoFamily = AF_UNSPEC;
     client.transportMode = TransportV3::MODE_CREDIT;
     client.sessionId = 0;
     client.localReceiverIndex = 0;
@@ -343,6 +343,13 @@ void Server::handleV4HandshakeInit(const TunnelHeader &, int dataLength,
     {
         delete client.secureHandshake;
         return;
+    }
+    if (windowsHelperHint)
+    {
+        KernelEchoGuard &guard = realAddress.family() == AF_INET6 ?
+                                 kernelEchoGuard6 : kernelEchoGuard;
+        if (guard.suppress())
+            client.kernelEchoFamily = realAddress.family();
     }
     clientList.push_front(client);
     clientReceiverIndexMap[client.localReceiverIndex] = clientList.begin();
@@ -413,12 +420,22 @@ void Server::handleV4HandshakeFinish(const TunnelHeader &, int dataLength,
     }
     if (!client->autoPoll && client->maxPolls == 0)
         client->transportMode = TransportV3::MODE_DIRECT;
-    if (connectData.capabilities & TransportV3::CAP_WINDOWS_ICMP_HELPER)
+    const bool usesWindowsHelper =
+        (connectData.capabilities & TransportV3::CAP_WINDOWS_ICMP_HELPER) != 0;
+    if (usesWindowsHelper && client->kernelEchoFamily == AF_UNSPEC)
     {
-        if (client->realAddress.family() == AF_INET6)
-            kernelEchoGuard6.suppress();
+        KernelEchoGuard &guard = client->realAddress.family() == AF_INET6 ?
+                                 kernelEchoGuard6 : kernelEchoGuard;
+        if (guard.suppress())
+            client->kernelEchoFamily = client->realAddress.family();
+    }
+    else if (!usesWindowsHelper && client->kernelEchoFamily != AF_UNSPEC)
+    {
+        if (client->kernelEchoFamily == AF_INET6)
+            kernelEchoGuard6.release();
         else
-            kernelEchoGuard.suppress();
+            kernelEchoGuard.release();
+        client->kernelEchoFamily = AF_UNSPEC;
     }
 
     ClientData *oldClient = getClientByDeviceId(client->deviceId, client);
@@ -1088,6 +1105,18 @@ bool Server::openV4Packet(ClientData *client, const TunnelHeader &header,
         syslog(LOG_INFO, "secure peer %s roamed from %s to %s",
                client->deviceId.c_str(), client->realAddress.format().c_str(),
                realAddress.format().c_str());
+        if (client->kernelEchoFamily != AF_UNSPEC &&
+            client->kernelEchoFamily != realAddress.family())
+        {
+            if (client->kernelEchoFamily == AF_INET6)
+                kernelEchoGuard6.release();
+            else
+                kernelEchoGuard.release();
+            KernelEchoGuard &guard = realAddress.family() == AF_INET6 ?
+                                     kernelEchoGuard6 : kernelEchoGuard;
+            client->kernelEchoFamily = guard.suppress() ?
+                                       realAddress.family() : AF_UNSPEC;
+        }
         client->realAddress = realAddress;
         client->realIp = realAddress.isIpv4() ? realAddress.ipv4Value() : 0;
         updateLease(client, true);

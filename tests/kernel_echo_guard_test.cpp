@@ -30,6 +30,11 @@ int main()
         assert(guard.suppress());
         assert(readValue(path) == 1);
         assert(guard.suppress());
+        guard.release();
+        assert(readValue(path) == 1);
+        guard.release();
+        assert(readValue(path) == 0);
+        guard.release();
     }
     assert(readValue(path) == 0);
     unlink(path);
