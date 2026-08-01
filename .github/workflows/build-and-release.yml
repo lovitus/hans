@@ -428,27 +428,6 @@ jobs:
               cp hans "dist/${{ matrix.label }}/hans-linux-${{ matrix.label }}"
               cp scripts/test-hans.sh "dist/${{ matrix.label }}/test-hans.sh"
               cp scripts/test-identity-leases.sh "dist/${{ matrix.label }}/test-identity-leases.sh"
-              if [ "${{ github.event_name }}" = workflow_dispatch ] && \
-                 [ "${{ matrix.label }}" = amd64-musl ]; then
-                mkdir -p dist/perf-candidates
-                cp "dist/${{ matrix.label }}/hans-linux-${{ matrix.label }}" \
-                  dist/perf-candidates/hans-seq-reorder-6x8m
-
-                make clean
-                make LDFLAGS=-static \
-                  OPTFLAGS="-O2 -fno-strict-aliasing -DHANS_TRANSPORT_REORDER_DELAY_MS=0"
-                strip -s hans
-                cp hans dist/perf-candidates/hans-seq-6x8m
-
-                make clean
-                make LDFLAGS=-static \
-                  OPTFLAGS="-O2 -fno-strict-aliasing -DHANS_SEQUENTIAL_ECHO_SEQUENCE=0 -DHANS_TRANSPORT_REORDER_DELAY_MS=0 -DHANS_TCP_RX_WINDOW=2097152 -DHANS_TCP_TX_WINDOW=2097152 -DHANS_TCP_SEND_QUEUE_LENGTH=4096"
-                strip -s hans
-                cp hans dist/perf-candidates/hans-compat-2m
-                cp scripts/test-hans.sh dist/perf-candidates/test-hans.sh
-                cp scripts/test-identity-leases.sh \
-                  dist/perf-candidates/test-identity-leases.sh
-              fi
             '
       - name: Test packaged binary in a fresh container
         run: |
@@ -526,6 +505,35 @@ jobs:
               cp hans "dist/${{ matrix.label }}/hans-linux-${{ matrix.label }}"
               cp scripts/test-hans.sh "dist/${{ matrix.label }}/test-hans.sh"
               cp scripts/test-identity-leases.sh "dist/${{ matrix.label }}/test-identity-leases.sh"
+              if [ "${{ github.event_name }}" = workflow_dispatch ] && \
+                 [ "${{ matrix.label }}" = amd64-musl ]; then
+                mkdir -p dist/perf-candidates
+                cp "dist/${{ matrix.label }}/hans-linux-${{ matrix.label }}" \
+                  dist/perf-candidates/hans-seq-reorder-6x8m
+
+                make clean
+                make LDFLAGS=-static \
+                  OPTFLAGS="-O2 -fno-strict-aliasing -DHANS_TRANSPORT_REORDER_DELAY_MS=0"
+                if readelf -d hans 2>/dev/null | grep -q NEEDED; then
+                  echo "seq-6x8m candidate is dynamically linked" >&2
+                  exit 1
+                fi
+                strip -s hans
+                cp hans dist/perf-candidates/hans-seq-6x8m
+
+                make clean
+                make LDFLAGS=-static \
+                  OPTFLAGS="-O2 -fno-strict-aliasing -DHANS_SEQUENTIAL_ECHO_SEQUENCE=0 -DHANS_TRANSPORT_REORDER_DELAY_MS=0 -DHANS_TCP_RX_WINDOW=2097152 -DHANS_TCP_TX_WINDOW=2097152 -DHANS_TCP_SEND_QUEUE_LENGTH=4096"
+                if readelf -d hans 2>/dev/null | grep -q NEEDED; then
+                  echo "compat-2m candidate is dynamically linked" >&2
+                  exit 1
+                fi
+                strip -s hans
+                cp hans dist/perf-candidates/hans-compat-2m
+                cp scripts/test-hans.sh dist/perf-candidates/test-hans.sh
+                cp scripts/test-identity-leases.sh \
+                  dist/perf-candidates/test-identity-leases.sh
+              fi
             '
       - name: Test packaged binary in a fresh Alpine container
         run: |
