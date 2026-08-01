@@ -13,6 +13,13 @@ ld)
         ;;
     esac
     ;;
+libs)
+    case $OS in
+        CYGWIN*)
+            echo -ladvapi32
+        ;;
+    esac
+    ;;
 c)
     case $OS in
         LINUX)

@@ -5,6 +5,7 @@ TUN_DEV_FILE = `sh osflags dev $(MODE)`
 GCC = gcc
 GPP = g++
 LWIP_CFLAGS = -Ithird_party/lwip/src/include -Ithird_party/lwip/port
+OS_LIBS = `sh osflags libs $(MODE)`
 LWIP_HEADERS = third_party/lwip/port/lwipopts.h third_party/lwip/port/arch/cc.h
 LWIP_CORE_SOURCES = init def inet_chksum ip mem memp netif pbuf stats sys tcp tcp_in tcp_out timeouts udp
 LWIP_IPV4_SOURCES = icmp ip4 ip4_addr ip4_frag
@@ -22,7 +23,7 @@ build_dir:
 tunemu.o: directories build/tunemu.o
 
 hans: build/tun.o build/sha1.o build/main.o build/client.o build/server.o build/auth.o build/secure.o build/monocypher.o build/worker.o build/transport.o build/time.o build/tun_dev.o build/echo.o build/exception.o build/utility.o build/userspace.o build/kernel_echo_guard.o $(LWIP_OBJECTS)
-	$(GPP) -o hans build/tun.o build/sha1.o build/main.o build/client.o build/server.o build/auth.o build/secure.o build/monocypher.o build/worker.o build/transport.o build/time.o build/tun_dev.o build/echo.o build/exception.o build/utility.o build/userspace.o build/kernel_echo_guard.o $(LWIP_OBJECTS) $(LDFLAGS)
+	$(GPP) -o hans build/tun.o build/sha1.o build/main.o build/client.o build/server.o build/auth.o build/secure.o build/monocypher.o build/worker.o build/transport.o build/time.o build/tun_dev.o build/echo.o build/exception.o build/utility.o build/userspace.o build/kernel_echo_guard.o $(LWIP_OBJECTS) $(LDFLAGS) $(OS_LIBS)
 
 test: build/transport_test build/secure_test build/protocol_v4_test build/userspace_test build/parser_fuzz_test build/kernel_echo_guard_test
 	./build/transport_test
@@ -36,10 +37,10 @@ build/transport_test: directories tests/transport_test.cpp src/transport.cpp src
 	$(GPP) tests/transport_test.cpp src/transport.cpp -o $@ -g -std=c++98 -pedantic -Wall -Wextra `sh osflags c $(MODE)`
 
 build/secure_test: directories tests/secure_test.cpp build/secure.o build/utility.o build/exception.o build/monocypher.o
-	$(GPP) tests/secure_test.cpp build/secure.o build/utility.o build/exception.o build/monocypher.o -o $@ -g -std=c++98 -pedantic -Wall -Wextra `sh osflags c $(MODE)`
+	$(GPP) tests/secure_test.cpp build/secure.o build/utility.o build/exception.o build/monocypher.o -o $@ -g -std=c++98 -pedantic -Wall -Wextra `sh osflags c $(MODE)` $(OS_LIBS)
 
 build/protocol_v4_test: directories tests/protocol_v4_test.cpp build/secure.o build/transport.o build/utility.o build/exception.o build/monocypher.o
-	$(GPP) tests/protocol_v4_test.cpp build/secure.o build/transport.o build/utility.o build/exception.o build/monocypher.o -o $@ -g -std=c++98 -pedantic -Wall -Wextra `sh osflags c $(MODE)`
+	$(GPP) tests/protocol_v4_test.cpp build/secure.o build/transport.o build/utility.o build/exception.o build/monocypher.o -o $@ -g -std=c++98 -pedantic -Wall -Wextra `sh osflags c $(MODE)` $(OS_LIBS)
 
 build/userspace_test: directories tests/userspace_test.cpp build/userspace.o build/utility.o build/exception.o build/time.o $(LWIP_OBJECTS)
 	$(GPP) tests/userspace_test.cpp build/userspace.o build/utility.o build/exception.o build/time.o $(LWIP_OBJECTS) -o $@ -g -std=c++98 -pedantic -Wall -Wextra $(LWIP_CFLAGS) `sh osflags c $(MODE)`

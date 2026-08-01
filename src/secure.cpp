@@ -12,6 +12,12 @@
 #include <sstream>
 #include <iomanip>
 
+#ifdef __CYGWIN__
+#include <windows.h>
+#include <aclapi.h>
+#include <sys/cygwin.h>
+#endif
+
 namespace
 {
     const char PROTOCOL_NAME[] = "Noise_XXpsk3_25519_ChaChaPoly_BLAKE2b";
@@ -189,6 +195,92 @@ namespace
         }
         return true;
     }
+
+#ifdef __CYGWIN__
+    bool isAllowedPrivateSid(PSID sid, PSID owner)
+    {
+        BYTE systemBuffer[SECURITY_MAX_SID_SIZE];
+        BYTE administratorsBuffer[SECURITY_MAX_SID_SIZE];
+        DWORD systemSize = sizeof(systemBuffer);
+        DWORD administratorsSize = sizeof(administratorsBuffer);
+        if (!CreateWellKnownSid(WinLocalSystemSid, NULL, systemBuffer, &systemSize) ||
+            !CreateWellKnownSid(WinBuiltinAdministratorsSid, NULL,
+                                administratorsBuffer, &administratorsSize))
+            return false;
+        return EqualSid(sid, owner) || EqualSid(sid, systemBuffer) ||
+               EqualSid(sid, administratorsBuffer);
+    }
+
+    bool hasPrivateWindowsAcl(const std::string &path)
+    {
+        ssize_t convertedSize = cygwin_conv_path(CCP_POSIX_TO_WIN_W,
+                                                  path.c_str(), NULL, 0);
+        if (convertedSize <= 0)
+            return false;
+        std::vector<unsigned char> converted((size_t)convertedSize);
+        if (cygwin_conv_path(CCP_POSIX_TO_WIN_W, path.c_str(), &converted[0],
+                            converted.size()) != 0)
+            return false;
+
+        PSID owner = NULL;
+        PACL dacl = NULL;
+        PSECURITY_DESCRIPTOR descriptor = NULL;
+        DWORD result = GetNamedSecurityInfoW(
+            reinterpret_cast<LPWSTR>(&converted[0]), SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+            &owner, NULL, &dacl, NULL, &descriptor);
+        if (result != ERROR_SUCCESS || owner == NULL || dacl == NULL)
+        {
+            if (descriptor != NULL)
+                LocalFree(descriptor);
+            return false;
+        }
+
+        bool privateAcl = true;
+        for (DWORD i = 0; i < dacl->AceCount && privateAcl; ++i)
+        {
+            void *rawAce = NULL;
+            if (!GetAce(dacl, i, &rawAce))
+            {
+                privateAcl = false;
+                break;
+            }
+            ACE_HEADER *header = static_cast<ACE_HEADER *>(rawAce);
+            if (header->AceType == ACCESS_ALLOWED_ACE_TYPE)
+            {
+                ACCESS_ALLOWED_ACE *ace = static_cast<ACCESS_ALLOWED_ACE *>(rawAce);
+                PSID sid = reinterpret_cast<PSID>(&ace->SidStart);
+                if (ace->Mask != 0 &&
+                    (!IsValidSid(sid) || !isAllowedPrivateSid(sid, owner)))
+                    privateAcl = false;
+            }
+            else if (header->AceType == ACCESS_ALLOWED_OBJECT_ACE_TYPE ||
+                     header->AceType == ACCESS_ALLOWED_CALLBACK_ACE_TYPE ||
+                     header->AceType == ACCESS_ALLOWED_CALLBACK_OBJECT_ACE_TYPE)
+            {
+                // Reject unfamiliar allow ACE layouts instead of accidentally
+                // accepting a key readable by another principal.
+                privateAcl = false;
+            }
+        }
+        LocalFree(descriptor);
+        return privateAcl;
+    }
+#endif
+
+    bool isPrivateRegularFile(const std::string &path, const struct stat &info)
+    {
+        if (!S_ISREG(info.st_mode))
+            return false;
+#ifdef __CYGWIN__
+        // Cygwin can synthesize 0644 for a file whose NTFS DACL is private.
+        // Validate the authoritative Windows ACL instead of the lossy mode bits.
+        return hasPrivateWindowsAcl(path);
+#else
+        (void)path;
+        return (info.st_mode & (S_IRWXG | S_IRWXO)) == 0;
+#endif
+    }
 }
 
 SecureIdentity::SecureIdentity()
@@ -212,8 +304,8 @@ void SecureIdentity::loadOrCreate(const std::string &path)
     if (fd >= 0)
     {
         struct stat info;
-        bool privateFile = fstat(fd, &info) == 0 && S_ISREG(info.st_mode) &&
-                           (info.st_mode & (S_IRWXG | S_IRWXO)) == 0;
+        bool privateFile = fstat(fd, &info) == 0 &&
+                           isPrivateRegularFile(path, info);
         bool ok = privateFile && readExact(fd, secret, sizeof(secret));
         uint8_t extra;
         bool exact = ok && read(fd, &extra, 1) == 0;

@@ -691,6 +691,14 @@ jobs:
               -not (Test-Path -LiteralPath $defaultStateFile)) {
             throw "Packaged hans.exe did not use native Windows state directory"
           }
+          $identity1 = (& $exe --show-identity | Out-String).Trim()
+          $identity2 = (& $exe --show-identity | Out-String).Trim()
+          $defaultIdentityFile = Join-Path $env:LOCALAPPDATA 'Hans\identity.key'
+          if ($identity1 -notmatch '^[0-9a-f]{32}$' -or
+              $identity1 -ne $identity2 -or
+              -not (Test-Path -LiteralPath $defaultIdentityFile)) {
+            throw "Packaged hans.exe failed native Windows identity reload test"
+          }
           $env:HANS_STATE_DIR = $statePosix
 
           $leaseWindows = Join-Path $state 'leases'
