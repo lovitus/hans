@@ -26,6 +26,7 @@
 #include <string.h>
 #include <arpa/inet.h>
 #include <syslog.h>
+#include <inttypes.h>
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -37,6 +38,7 @@
 #include <time.h>
 
 using std::string;
+using std::vector;
 using std::cout;
 using std::endl;
 
@@ -564,6 +566,16 @@ bool Server::handleEchoData(const TunnelHeader &header, int dataLength,
         TransportV3::Header transport;
         if (!parseTransportHeader(client, dataLength, transport))
             return true;
+        vector<vector<char> > reorderedPackets;
+        bool isData = header.type == TunnelHeader::TYPE_DATA;
+        TransportReorderBuffer::Action reorderAction =
+            client->reorderBuffer.observe(
+                transport.txSequence, isData,
+                echoReceivePayloadBuffer() + TransportV3::HEADER_SIZE,
+                dataLength, now.milliseconds(), reorderedPackets);
+        if (!isData)
+            deliverReorderedPackets(client, reorderedPackets);
+        logTransportTelemetry(client);
         processTransportAck(client, transport);
         if (client->autoPoll)
         {
@@ -580,11 +592,13 @@ bool Server::handleEchoData(const TunnelHeader &header, int dataLength,
         switch (header.type)
         {
             case TunnelHeader::TYPE_DATA:
-                if (dataLength > 0)
+                if (dataLength > 0 &&
+                    reorderAction == TransportReorderBuffer::DELIVER_CURRENT)
                     handleClientData(
                         client,
                         echoReceivePayloadBuffer() + TransportV3::HEADER_SIZE,
                         dataLength);
+                deliverReorderedPackets(client, reorderedPackets);
                 return true;
             case TunnelHeader::TYPE_POLL:
                 return true;
@@ -652,12 +666,23 @@ bool Server::handleEchoData(const TunnelHeader &header, int dataLength,
     }
 
     TransportV3::Header transport;
+    vector<vector<char> > reorderedPackets;
+    TransportReorderBuffer::Action reorderAction =
+        TransportReorderBuffer::IGNORE_CURRENT;
     if (header.type != TunnelHeader::TYPE_CONNECTION_REQUEST &&
         client->state == ClientData::STATE_ESTABLISHED &&
         client->protocolVersion == 3)
     {
         if (!parseTransportHeader(client, dataLength, transport))
             return true;
+        bool isData = header.type == TunnelHeader::TYPE_DATA;
+        reorderAction = client->reorderBuffer.observe(
+            transport.txSequence, isData,
+            echoReceivePayloadBuffer() + TransportV3::HEADER_SIZE,
+            dataLength, now.milliseconds(), reorderedPackets);
+        if (!isData)
+            deliverReorderedPackets(client, reorderedPackets);
+        logTransportTelemetry(client);
         processTransportAck(client, transport);
 
         if (client->autoPoll)
@@ -711,10 +736,16 @@ bool Server::handleEchoData(const TunnelHeader &header, int dataLength,
                 }
 
                 if (client->protocolVersion == 3)
-                    handleClientData(
-                        client,
-                        echoReceivePayloadBuffer() + TransportV3::HEADER_SIZE,
-                        dataLength);
+                {
+                    if (reorderAction ==
+                        TransportReorderBuffer::DELIVER_CURRENT)
+                        handleClientData(
+                            client,
+                            echoReceivePayloadBuffer() +
+                                TransportV3::HEADER_SIZE,
+                            dataLength);
+                    deliverReorderedPackets(client, reorderedPackets);
+                }
                 else
                     handleClientData(client, echoReceivePayloadBuffer(),
                                      dataLength);
@@ -880,6 +911,43 @@ void Server::handleClientData(ClientData *sourceClient, const char *packet,
     }
 
     tun.write(packet, packetLength);
+}
+
+void Server::deliverReorderedPackets(
+    ClientData *client, vector<vector<char> > &packets)
+{
+    for (size_t i = 0; i < packets.size(); ++i)
+        if (!packets[i].empty())
+            handleClientData(client, &packets[i][0], (int)packets[i].size());
+    packets.clear();
+}
+
+void Server::logTransportTelemetry(ClientData *client)
+{
+    bool anomalies = client->receivedSequences.gapCount() != 0 ||
+                     client->receivedSequences.duplicateCount() != 0 ||
+                     client->reorderBuffer.releasedGapCount() != 0;
+    if (!anomalies ||
+        (client->lastTransportTelemetry != Time::ZERO &&
+         !(client->lastTransportTelemetry + Time(5000) < now)))
+        return;
+    client->lastTransportTelemetry = now;
+    syslog(LOG_DEBUG,
+           "transport peer=%s rx=%" PRIu64 " gaps=%" PRIu64
+           " missing=%" PRIu64 " late=%" PRIu64 " dup=%" PRIu64
+           " held=%" PRIu64 " released=%" PRIu64 " skipped=%" PRIu64
+           " late-release=%" PRIu64 " depth=%u",
+           client->deviceId.c_str(),
+           client->receivedSequences.acceptedCount(),
+           client->receivedSequences.gapCount(),
+           client->receivedSequences.missingCount(),
+           client->receivedSequences.lateCount(),
+           client->receivedSequences.duplicateCount(),
+           client->reorderBuffer.bufferedCount(),
+           client->reorderBuffer.releasedGapCount(),
+           client->reorderBuffer.skippedCount(),
+           client->reorderBuffer.lateReleaseCount(),
+           (unsigned int)client->reorderBuffer.maximumDepth());
 }
 
 void Server::handleTunData(int dataLength, uint32_t, uint32_t destIp)
@@ -1220,6 +1288,33 @@ void Server::handleTimeout()
 
     saveLeases();
     setTimeout(KEEP_ALIVE_INTERVAL);
+}
+
+int Server::idleIntervalMilliseconds() const
+{
+    int interval = -1;
+    for (ClientList::const_iterator it = clientList.begin();
+         it != clientList.end(); ++it)
+    {
+        int wait = it->reorderBuffer.waitMilliseconds(now.milliseconds());
+        if (wait >= 0 && (interval < 0 || wait < interval))
+            interval = wait;
+    }
+    return interval;
+}
+
+void Server::handleIdle()
+{
+    for (ClientList::iterator it = clientList.begin();
+         it != clientList.end(); ++it)
+    {
+        vector<vector<char> > packets;
+        if (it->reorderBuffer.flushExpired(now.milliseconds(), packets))
+        {
+            deliverReorderedPackets(&*it, packets);
+            logTransportTelemetry(&*it);
+        }
+    }
 }
 
 uint32_t Server::reserveTunnelIp(uint32_t desiredIp, const string &deviceId)

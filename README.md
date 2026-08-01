@@ -19,7 +19,7 @@ deployment, compatibility, and peer-management features:
 | Sticky tunnel addresses | The server remembers device-to-IP leases across reconnects and server restarts, so clients normally keep the same tunnel address without configuring `-a`. |
 | Lease retention | Offline leases are retained while unused addresses remain. When the pool is full, only the least-recently-seen offline lease is reclaimed; active peers are never evicted. |
 | Peer inspection | `hans --list-peers` shows device ID, tunnel IP, real IP, online/offline state, and last-seen time; `--json` provides stable machine-readable output. `hans --show-identity` displays the v4 public fingerprint. |
-| Adaptive transport | Protocol v3 starts with conservative echo-request credits, measures reply RTT and server backlog, and adjusts the credit count instead of requiring a guessed `-w` window. |
+| Adaptive transport | Protocol v3 starts with conservative echo-request credits, measures reply RTT and server backlog, and adjusts the credit count instead of requiring a guessed `-w` window. Current peers use ordinary sequential ICMP echo tokens and briefly reorder only inner data that demonstrably arrived out of order. |
 | Adaptive timing and MTU | Retransmission timeout follows RFC 6298-style smoothed RTT/variance with bounded exponential backoff. v4 peers negotiate the smaller configured inner MTU and lower the server interface conservatively, so differently configured peers do not silently overrun one another. |
 | Direct-reply upgrade and fallback | A client probes whether the path safely passes multiple replies for one echo request. A successful path upgrades to direct replies; sequence/ACK tracking and heartbeats automatically return it to adaptive credits if that path stops working, then probe it again after a quiet interval. |
 | Low-risk data fast path | Release builds enable conservative `-O2` optimization. Linux keeps the single-threaded packet/state owner but uses opportunistic `recvmmsg`/`sendmmsg` batches, bounded TUN queue draining, in-place v4 AEAD, and preallocated contiguous direct-ACK tracking. Packets are never coalesced, batching never waits to fill, and unsupported kernels automatically retain the portable one-packet syscall path. |
@@ -62,8 +62,11 @@ deployment, compatibility, and peer-management features:
   conservative credit-mode fallback, with a later probe to recover direct mode.
 - On Linux the event loop may drain up to 16 packets that are already ready and
   submit/receive them with batched syscalls. It remains one thread and processes
-  every datagram in order; control packets are flushed at the end of the same
-  event-loop iteration rather than waiting for a batch timer.
+  every received datagram synchronously; control packets are flushed at the end
+  of the same event-loop iteration rather than waiting for a batch timer. A
+  per-peer data-only reorder layer holds at most 32 genuinely early packets for
+  2 ms. In-order traffic is passed through without allocation or delay, and
+  control messages are never delayed.
 - **Server mode is Linux-only** (it relies on Linux-specific networking
   behavior). **Client mode** works on Linux, FreeBSD, OpenBSD, NetBSD, macOS
   and Windows (via Cygwin).
@@ -264,7 +267,8 @@ bridge to `127.0.0.1:N`. One internal fallback listener handles this without
 opening 65535 sockets or spawning `socat`; bridges exist only for active
 connections. This option is intentionally not enabled by default.
 
-The embedded TCP stack uses scaled, high-bandwidth windows in both directions.
+The embedded TCP stack uses an 8 MiB scaled receive window and a 6 MiB send
+buffer, with queue capacity sized consistently for the configured MSS.
 Window capacity is allocated only as traffic is queued, so an idle userspace
 connection does not reserve the full bandwidth-delay product. This matters on
 paths with tens of milliseconds of latency, where a traditional 64 KiB send
@@ -448,8 +452,13 @@ sudo ./hans -s 10.0.0.0 -p secret -r
 | `-w auto` | Default. Negotiate v3 adaptive credits, probe direct replies, automatically downgrade on failure, and retry the direct path later. Usually no tuning is needed. |
 | `-w polls` | Force the old fixed credit count for diagnostics or a known path. `0` forces direct replies and intentionally disables automatic fallback; prefer `auto` for normal use. |
 | `-i` | Change the ICMP echo **id** on every request (client only). Helps with routers/firewalls that get confused by a static id. |
-| `-q` | Change the ICMP echo **sequence number** on every request (client only). Same rationale as `-i`. |
+| `-q` | Use non-sequential ICMP echo **sequence numbers** (client only). Current v3/v4 sessions otherwise advance the normal sequence by one and carry into the echo ID on wrap. Use this only for diagnosing a middlebox that mishandles the ordinary form. |
 | `-d device` | Force a specific virtual interface name instead of auto-selecting `hans1`, `hans2`, and so on. |
+
+With `-v`, transport anomaly summaries report accepted packets, forward gaps,
+temporarily missing sequences, late/duplicate arrivals, reorder holds, forced
+gap releases, skipped sequences, and maximum reorder depth. The counters are
+per peer and rate-limited; they do not enable packet capture or log payloads.
 
 ## Running as a systemd service (Linux)
 

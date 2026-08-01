@@ -39,5 +39,20 @@
 
 #define DEVICE_ID_HEX_SIZE 32
 
+// Keep ICMP echo tokens friendly to stateful middleboxes.  These switches are
+// intentionally overridable so validation builds can isolate each transport
+// optimization without changing the wire protocol.
+#ifndef HANS_SEQUENTIAL_ECHO_SEQUENCE
+#define HANS_SEQUENTIAL_ECHO_SEQUENCE 1
+#endif
+
+#ifndef HANS_TRANSPORT_REORDER_DELAY_MS
+#define HANS_TRANSPORT_REORDER_DELAY_MS 2
+#endif
+
+#ifndef HANS_TRANSPORT_REORDER_MAX_PACKETS
+#define HANS_TRANSPORT_REORDER_MAX_PACKETS 32
+#endif
+
 // #define DEBUG_ONLY(a) a
 #define DEBUG_ONLY(a)

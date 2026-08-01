@@ -25,9 +25,9 @@ namespace
 
 int main()
 {
-    expect(TCP_WND >= 2 * 1024 * 1024,
+    expect(TCP_WND >= 8 * 1024 * 1024,
            "receive window supports high-bandwidth VPN paths");
-    expect(TCP_SND_BUF >= 2 * 1024 * 1024,
+    expect(TCP_SND_BUF >= 6 * 1024 * 1024,
            "send buffer supports high-bandwidth VPN paths");
     expect(TCP_SND_QUEUELEN >=
            2 * ((TCP_SND_BUF + TCP_MSS - 1) / TCP_MSS),

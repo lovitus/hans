@@ -27,6 +27,7 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <syslog.h>
+#include <inttypes.h>
 #include <algorithm>
 
 using std::vector;
@@ -307,10 +308,21 @@ bool Client::handleEchoData(const TunnelHeader &header, int dataLength,
     }
 
     TransportV3::Header transport;
+    TransportReorderBuffer::Action reorderAction =
+        TransportReorderBuffer::IGNORE_CURRENT;
+    vector<vector<char> > reorderedPackets;
     if (state == STATE_ESTABLISHED && protocolVersion >= 3)
     {
         if (!parseTransportHeader(dataLength, transport, id, seq))
             return true;
+        bool isData = header.type == TunnelHeader::TYPE_DATA;
+        reorderAction = reorderBuffer.observe(
+            transport.txSequence, isData,
+            echoReceivePayloadBuffer() + TransportV3::HEADER_SIZE,
+            dataLength, now.milliseconds(), reorderedPackets);
+        if (!isData)
+            deliverReorderedPackets(reorderedPackets);
+        logTransportTelemetry();
     }
 
     switch (header.type)
@@ -422,7 +434,14 @@ bool Client::handleEchoData(const TunnelHeader &header, int dataLength,
         case TunnelHeader::TYPE_DATA:
             if (state == STATE_ESTABLISHED)
             {
-                handleDataFromServer(dataLength);
+                if (protocolVersion >= 3)
+                {
+                    if (reorderAction == TransportReorderBuffer::DELIVER_CURRENT)
+                        handleDataFromServer(dataLength);
+                    deliverReorderedPackets(reorderedPackets);
+                }
+                else
+                    handleDataFromServer(dataLength);
                 return true;
             }
             break;
@@ -565,7 +584,11 @@ void Client::sendV3ToServer(Worker::TunnelHeader::Type type, int dataLength,
     // Adaptive credits need a unique request token so replies can be matched
     // to their send time even when the legacy -q option was not requested.
     if (!changeEchoSeq)
+#if HANS_SEQUENTIAL_ECHO_SEQUENCE
+        TransportV3::advanceEchoToken(nextEchoId, nextEchoSequence);
+#else
         nextEchoSequence = nextEchoSequence + 38543;
+#endif
     if (trackPoll)
         outstandingPolls[echoKey(sentId, sentSeq)] = now;
 }
@@ -782,6 +805,11 @@ void Client::handleDataFromServer(int dataLength)
     const char *packet = protocolVersion >= 3 ?
         echoReceivePayloadBuffer() + TransportV3::HEADER_SIZE :
         echoReceivePayloadBuffer();
+    handleDataPacket(packet, dataLength);
+}
+
+void Client::handleDataPacket(const char *packet, int dataLength)
+{
     if (userspaceNetwork != NULL)
         userspaceNetwork->ingest(packet, dataLength);
     else if (protocolVersion >= 3)
@@ -799,6 +827,41 @@ void Client::handleDataFromServer(int dataLength)
     }
     else if (maxPolls != 0)
         sendEchoToServer(TunnelHeader::TYPE_POLL, 0);
+}
+
+void Client::deliverReorderedPackets(vector<vector<char> > &packets)
+{
+    for (size_t i = 0; i < packets.size(); ++i)
+        if (!packets[i].empty())
+            handleDataPacket(&packets[i][0], (int)packets[i].size());
+    packets.clear();
+}
+
+void Client::logTransportTelemetry()
+{
+    bool anomalies = receivedSequences.gapCount() != 0 ||
+                     receivedSequences.duplicateCount() != 0 ||
+                     reorderBuffer.releasedGapCount() != 0;
+    if (!anomalies ||
+        (lastTransportTelemetry != Time::ZERO &&
+         !(lastTransportTelemetry + Time(5000) < now)))
+        return;
+    lastTransportTelemetry = now;
+    syslog(LOG_DEBUG,
+           "transport rx=%" PRIu64 " gaps=%" PRIu64 " missing=%" PRIu64
+           " late=%" PRIu64 " dup=%" PRIu64 " held=%" PRIu64
+           " released=%" PRIu64 " skipped=%" PRIu64
+           " late-release=%" PRIu64 " depth=%u",
+           receivedSequences.acceptedCount(),
+           receivedSequences.gapCount(),
+           receivedSequences.missingCount(),
+           receivedSequences.lateCount(),
+           receivedSequences.duplicateCount(),
+           reorderBuffer.bufferedCount(),
+           reorderBuffer.releasedGapCount(),
+           reorderBuffer.skippedCount(),
+           reorderBuffer.lateReleaseCount(),
+           (unsigned int)reorderBuffer.maximumDepth());
 }
 
 void Client::handleTunData(int dataLength, uint32_t, uint32_t)
@@ -872,11 +935,21 @@ void Client::handleFileDescriptors(fd_set &readSet, fd_set &writeSet)
 
 int Client::idleIntervalMilliseconds() const
 {
-    return userspaceNetwork == NULL ? -1 : 50;
+    int interval = userspaceNetwork == NULL ? -1 : 50;
+    int reorderWait = reorderBuffer.waitMilliseconds(now.milliseconds());
+    if (reorderWait >= 0 && (interval < 0 || reorderWait < interval))
+        interval = reorderWait;
+    return interval;
 }
 
 void Client::handleIdle()
 {
+    vector<vector<char> > packets;
+    if (reorderBuffer.flushExpired(now.milliseconds(), packets))
+    {
+        deliverReorderedPackets(packets);
+        logTransportTelemetry();
+    }
     if (userspaceNetwork != NULL)
         userspaceNetwork->tick();
 }

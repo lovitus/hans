@@ -50,6 +50,11 @@ static void testSequenceTracking()
     assert(tracker.accept(11));
     assert(!tracker.accept(11));
     assert(!tracker.accept(12));
+    assert(tracker.acceptedCount() == 3);
+    assert(tracker.gapCount() == 1);
+    assert(tracker.missingCount() == 1);
+    assert(tracker.lateCount() == 1);
+    assert(tracker.duplicateCount() == 2);
     assert(tracker.ackSequence() == 12);
     assert(TransportV3::acknowledged(12, tracker.ackSequence(), tracker.ackBits()));
     assert(TransportV3::acknowledged(11, tracker.ackSequence(), tracker.ackBits()));
@@ -71,6 +76,70 @@ static void testSequenceTracking()
     assert(!distant.accept(100));
     assert(!TransportV3::acknowledged(100, distant.ackSequence(),
                                       distant.ackBits()));
+}
+
+static std::vector<char> packet(const char *text)
+{
+    return std::vector<char>(text, text + strlen(text));
+}
+
+static void testTransportReordering()
+{
+    TransportReorderBuffer reorder;
+    std::vector<std::vector<char> > ready;
+    std::vector<char> a = packet("a");
+    std::vector<char> b = packet("b");
+    std::vector<char> c = packet("c");
+    std::vector<char> e = packet("e");
+    std::vector<char> f = packet("f");
+
+    assert(reorder.observe(10, true, &a[0], a.size(), 100, ready) ==
+           TransportReorderBuffer::DELIVER_CURRENT);
+    assert(ready.empty());
+    assert(reorder.observe(12, true, &c[0], c.size(), 101, ready) ==
+           TransportReorderBuffer::HOLD_CURRENT);
+    assert(reorder.pending());
+    assert(reorder.waitMilliseconds(101) > 0);
+    assert(reorder.observe(11, true, &b[0], b.size(), 101, ready) ==
+           TransportReorderBuffer::DELIVER_CURRENT);
+    assert(ready.size() == 1 && ready[0] == c);
+    ready.clear();
+
+    // A control marker participates in sequence ordering without copying a
+    // payload or appearing in the data-ready list.
+    assert(reorder.observe(14, false, NULL, 0, 102, ready) ==
+           TransportReorderBuffer::HOLD_CURRENT);
+    std::vector<char> d = packet("d");
+    assert(reorder.observe(13, true, &d[0], d.size(), 102, ready) ==
+           TransportReorderBuffer::DELIVER_CURRENT);
+    assert(ready.empty());
+
+    assert(reorder.observe(16, true, &f[0], f.size(), 103, ready) ==
+           TransportReorderBuffer::HOLD_CURRENT);
+    assert(!reorder.flushExpired(104, ready));
+    assert(reorder.flushExpired(105, ready));
+    assert(ready.size() == 1 && ready[0] == f);
+    ready.clear();
+    assert(reorder.releasedGapCount() == 1);
+    assert(reorder.skippedCount() == 1);
+
+    // A packet arriving after the bounded wait is released immediately so a
+    // delayed packet is not silently discarded by the reorder layer.
+    assert(reorder.observe(15, true, &e[0], e.size(), 106, ready) ==
+           TransportReorderBuffer::DELIVER_CURRENT);
+    assert(reorder.lateReleaseCount() == 1);
+    assert(reorder.maximumDepth() == 1);
+}
+
+static void testSequentialEchoTokens()
+{
+    uint16_t id = 7;
+    uint16_t sequence = 41;
+    TransportV3::advanceEchoToken(id, sequence);
+    assert(id == 7 && sequence == 42);
+    sequence = 0xffff;
+    TransportV3::advanceEchoToken(id, sequence);
+    assert(id == 8 && sequence == 0);
 }
 
 static void testAdaptiveCredit()
@@ -162,6 +231,8 @@ int main()
 {
     testHeaderRoundTrip();
     testSequenceTracking();
+    testTransportReordering();
+    testSequentialEchoTokens();
     testAdaptiveCredit();
     testWindowsCreditLifetime();
     testDirectAckTracker();

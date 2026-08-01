@@ -9,6 +9,7 @@
  */
 
 #include "transport.h"
+#include "config.h"
 
 #include <arpa/inet.h>
 #include <string.h>
@@ -112,26 +113,47 @@ bool TransportV3::acknowledged(uint32_t sequence, uint32_t ackSequence,
     return distance <= 32 && (ackBits & (1u << (distance - 1))) != 0;
 }
 
+void TransportV3::advanceEchoToken(uint16_t &id, uint16_t &sequence)
+{
+    sequence++;
+    if (sequence == 0)
+        id++;
+}
+
 SequenceTracker::SequenceTracker()
 {
     largest = 0;
     receivedBits = 0;
+    acceptedPackets = 0;
+    duplicatePackets = 0;
+    gapEvents = 0;
+    missingPackets = 0;
+    latePackets = 0;
 }
 
 bool SequenceTracker::accept(uint32_t sequence)
 {
     if (sequence == 0)
+    {
+        duplicatePackets++;
         return false;
+    }
 
     if (largest == 0)
     {
         largest = sequence;
+        acceptedPackets++;
         return true;
     }
 
     if (TransportV3::sequenceAfter(sequence, largest))
     {
         uint32_t distance = sequence - largest;
+        if (distance > 1)
+        {
+            gapEvents++;
+            missingPackets += distance - 1;
+        }
         if (distance > 32)
             receivedBits = 0;
         else
@@ -140,18 +162,182 @@ bool SequenceTracker::accept(uint32_t sequence)
             receivedBits |= 1u << (distance - 1);
         }
         largest = sequence;
+        acceptedPackets++;
         return true;
     }
 
     uint32_t distance = largest - sequence;
     if (distance == 0 || distance > 32)
+    {
+        duplicatePackets++;
         return false;
+    }
 
     uint32_t bit = 1u << (distance - 1);
     if ((receivedBits & bit) != 0)
+    {
+        duplicatePackets++;
         return false;
+    }
     receivedBits |= bit;
+    acceptedPackets++;
+    latePackets++;
     return true;
+}
+
+TransportReorderBuffer::TransportReorderBuffer()
+{
+    initialized = false;
+    expected = 0;
+    gapSinceMilliseconds = 0;
+    bufferedPackets = 0;
+    releasedGaps = 0;
+    skippedSequences = 0;
+    lateReleases = 0;
+    maxDepth = 0;
+    items.reserve(HANS_TRANSPORT_REORDER_MAX_PACKETS);
+}
+
+uint32_t TransportReorderBuffer::nextSequence(uint32_t sequence)
+{
+    sequence++;
+    return sequence == 0 ? 1 : sequence;
+}
+
+size_t TransportReorderBuffer::find(uint32_t sequence) const
+{
+    for (size_t i = 0; i < items.size(); ++i)
+        if (items[i].sequence == sequence)
+            return i;
+    return items.size();
+}
+
+void TransportReorderBuffer::drain(
+    std::vector<std::vector<char> > &ready)
+{
+    while (true)
+    {
+        size_t index = find(expected);
+        if (index == items.size())
+            break;
+        Item item = items[index];
+        items.erase(items.begin() + index);
+        if (item.isData)
+            ready.push_back(item.data);
+        expected = nextSequence(expected);
+    }
+    if (items.empty())
+        gapSinceMilliseconds = 0;
+}
+
+bool TransportReorderBuffer::releaseGap(
+    int64_t nowMilliseconds, std::vector<std::vector<char> > &ready)
+{
+    if (items.empty())
+        return false;
+
+    size_t nearest = items.size();
+    uint32_t nearestDistance = 0;
+    for (size_t i = 0; i < items.size(); ++i)
+    {
+        if (!TransportV3::sequenceAfter(items[i].sequence, expected))
+            continue;
+        uint32_t distance = items[i].sequence - expected;
+        if (nearest == items.size() || distance < nearestDistance)
+        {
+            nearest = i;
+            nearestDistance = distance;
+        }
+    }
+    if (nearest == items.size())
+        return false;
+
+    skippedSequences += nearestDistance;
+    releasedGaps++;
+    expected = items[nearest].sequence;
+    gapSinceMilliseconds = 0;
+    drain(ready);
+    if (!items.empty())
+        gapSinceMilliseconds = nowMilliseconds;
+    return true;
+}
+
+TransportReorderBuffer::Action TransportReorderBuffer::observe(
+    uint32_t sequence, bool isData, const char *data, int length,
+    int64_t nowMilliseconds, std::vector<std::vector<char> > &ready)
+{
+    if (!initialized)
+    {
+        initialized = true;
+        expected = sequence;
+    }
+
+#if HANS_TRANSPORT_REORDER_DELAY_MS <= 0
+    expected = nextSequence(sequence);
+    return isData ? DELIVER_CURRENT : IGNORE_CURRENT;
+#else
+    if (sequence == expected)
+    {
+        expected = nextSequence(expected);
+        drain(ready);
+        return isData ? DELIVER_CURRENT : IGNORE_CURRENT;
+    }
+
+    if (!TransportV3::sequenceAfter(sequence, expected))
+    {
+        if (isData)
+        {
+            lateReleases++;
+            return DELIVER_CURRENT;
+        }
+        return IGNORE_CURRENT;
+    }
+
+    Item item;
+    item.sequence = sequence;
+    item.isData = isData;
+    if (isData && length > 0)
+        item.data.assign(data, data + length);
+    items.push_back(item);
+    bufferedPackets++;
+    if (items.size() > maxDepth)
+        maxDepth = items.size();
+    if (gapSinceMilliseconds == 0)
+        gapSinceMilliseconds = nowMilliseconds;
+
+    if (items.size() >= HANS_TRANSPORT_REORDER_MAX_PACKETS)
+        releaseGap(nowMilliseconds, ready);
+    return HOLD_CURRENT;
+#endif
+}
+
+bool TransportReorderBuffer::flushExpired(
+    int64_t nowMilliseconds, std::vector<std::vector<char> > &ready)
+{
+#if HANS_TRANSPORT_REORDER_DELAY_MS <= 0
+    (void)nowMilliseconds;
+    (void)ready;
+    return false;
+#else
+    if (items.empty() || gapSinceMilliseconds == 0 ||
+        nowMilliseconds - gapSinceMilliseconds < HANS_TRANSPORT_REORDER_DELAY_MS)
+        return false;
+    return releaseGap(nowMilliseconds, ready);
+#endif
+}
+
+int TransportReorderBuffer::waitMilliseconds(int64_t nowMilliseconds) const
+{
+#if HANS_TRANSPORT_REORDER_DELAY_MS <= 0
+    (void)nowMilliseconds;
+    return -1;
+#else
+    if (items.empty() || gapSinceMilliseconds == 0)
+        return -1;
+    int64_t remaining = HANS_TRANSPORT_REORDER_DELAY_MS -
+                        (nowMilliseconds - gapSinceMilliseconds);
+    return remaining > 0 ? (int)remaining : 0;
+#endif
 }
 
 DirectAckTracker::DirectAckTracker()

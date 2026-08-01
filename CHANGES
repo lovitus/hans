@@ -15,8 +15,11 @@ Release 1.5 (August 2026)
   tracking, optimized release builds, and single-threaded opportunistic Linux
   packet batching
 * Raise the userspace TCP send and receive windows for high-bandwidth,
-  higher-latency VPN paths instead of capping throughput at one small window
-  per round trip
+  higher-latency VPN paths to 6 MiB and 8 MiB respectively instead of capping
+  throughput at one small window per round trip
+* Use conventional sequential ICMP echo tokens for current sessions, add
+  per-peer gap/late/duplicate telemetry, and briefly reorder only inner data
+  that arrives ahead of a missing sequence; the normal path remains zero-copy
 
 Release 1.4 (July 2026)
 -----------------------

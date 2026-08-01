@@ -76,6 +76,9 @@ protected:
     virtual void sendUserspacePacket(const char *packet, int length);
 
     void handleDataFromServer(int length);
+    void handleDataPacket(const char *packet, int length);
+    void deliverReorderedPackets(std::vector<std::vector<char> > &packets);
+    void logTransportTelemetry();
 
     void startPolling();
     void fillPollWindow();
@@ -121,6 +124,8 @@ protected:
     SecureTransport secureTransport;
     uint32_t nextTransportSequence;
     SequenceTracker receivedSequences;
+    TransportReorderBuffer reorderBuffer;
+    Time lastTransportTelemetry;
     AdaptiveCredit adaptiveCredit;
     std::map<uint32_t, Time> outstandingPolls;
     uint8_t transportMode;

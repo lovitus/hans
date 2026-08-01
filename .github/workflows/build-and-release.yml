@@ -428,6 +428,27 @@ jobs:
               cp hans "dist/${{ matrix.label }}/hans-linux-${{ matrix.label }}"
               cp scripts/test-hans.sh "dist/${{ matrix.label }}/test-hans.sh"
               cp scripts/test-identity-leases.sh "dist/${{ matrix.label }}/test-identity-leases.sh"
+              if [ "${{ github.event_name }}" = workflow_dispatch ] && \
+                 [ "${{ matrix.label }}" = amd64-musl ]; then
+                mkdir -p dist/perf-candidates
+                cp "dist/${{ matrix.label }}/hans-linux-${{ matrix.label }}" \
+                  dist/perf-candidates/hans-seq-reorder-6x8m
+
+                make clean
+                make LDFLAGS=-static \
+                  OPTFLAGS="-O2 -fno-strict-aliasing -DHANS_TRANSPORT_REORDER_DELAY_MS=0"
+                strip -s hans
+                cp hans dist/perf-candidates/hans-seq-6x8m
+
+                make clean
+                make LDFLAGS=-static \
+                  OPTFLAGS="-O2 -fno-strict-aliasing -DHANS_SEQUENTIAL_ECHO_SEQUENCE=0 -DHANS_TRANSPORT_REORDER_DELAY_MS=0 -DHANS_TCP_RX_WINDOW=2097152 -DHANS_TCP_TX_WINDOW=2097152 -DHANS_TCP_SEND_QUEUE_LENGTH=4096"
+                strip -s hans
+                cp hans dist/perf-candidates/hans-compat-2m
+                cp scripts/test-hans.sh dist/perf-candidates/test-hans.sh
+                cp scripts/test-identity-leases.sh \
+                  dist/perf-candidates/test-identity-leases.sh
+              fi
             '
       - name: Test packaged binary in a fresh container
         run: |
@@ -513,10 +534,28 @@ jobs:
             -v "${{ github.workspace }}/dist/${{ matrix.label }}:/product:ro" \
             alpine:3.20 \
             sh /product/test-hans.sh "/product/hans-linux-${{ matrix.label }}" "linux-${{ matrix.label }}-packaged"
+      - name: Test performance candidates in a fresh Alpine container
+        if: github.event_name == 'workflow_dispatch' && matrix.label == 'amd64-musl'
+        run: |
+          for candidate in compat-2m seq-6x8m seq-reorder-6x8m; do
+            docker run --rm --platform linux/amd64 \
+              -e HANS_SKIP_CONNECTION_TEST=1 \
+              -v "${{ github.workspace }}/dist/perf-candidates:/product:ro" \
+              alpine:3.20 \
+              sh /product/test-hans.sh "/product/hans-$candidate" "candidate-$candidate"
+          done
       - uses: actions/upload-artifact@v4
         with:
           name: hans-linux-${{ matrix.label }}
           path: dist/${{ matrix.label }}/hans-linux-${{ matrix.label }}
+      - uses: actions/upload-artifact@v4
+        if: github.event_name == 'workflow_dispatch' && matrix.label == 'amd64-musl'
+        with:
+          name: hans-linux-amd64-perf-candidates
+          path: |
+            dist/perf-candidates/hans-compat-2m
+            dist/perf-candidates/hans-seq-6x8m
+            dist/perf-candidates/hans-seq-reorder-6x8m
 
   # ---------------------------------------------------------------------
   # macOS: Intel (x86_64) and Apple Silicon (arm64).

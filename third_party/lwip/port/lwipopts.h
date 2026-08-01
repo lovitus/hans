@@ -43,18 +43,27 @@
 #define PBUF_POOL_BUFSIZE               1600
 
 #define TCP_MSS                         1400
-/* Keep enough data in flight for roughly 400 Mbit/s over a 40 ms VPN path.
- * These values are capacities, not preallocated per-connection storage: lwIP
- * allocates queued pbufs on demand through MEM_LIBC_MALLOC. */
-#define HANS_TCP_BDP_WINDOW             (2 * 1024 * 1024)
-#define TCP_WND                         HANS_TCP_BDP_WINDOW
-#define TCP_SND_BUF                     HANS_TCP_BDP_WINDOW
-#define TCP_SND_QUEUELEN                4096
+/* Keep enough data in flight on higher-BDP VPN paths. These are upper bounds,
+ * not per-connection preallocations: lwIP allocates pbufs on demand. Separate
+ * overridable values also let validation builds isolate memory/performance
+ * tradeoffs without source edits. */
+#ifndef HANS_TCP_RX_WINDOW
+#define HANS_TCP_RX_WINDOW              (8 * 1024 * 1024)
+#endif
+#ifndef HANS_TCP_TX_WINDOW
+#define HANS_TCP_TX_WINDOW              (6 * 1024 * 1024)
+#endif
+#ifndef HANS_TCP_SEND_QUEUE_LENGTH
+#define HANS_TCP_SEND_QUEUE_LENGTH      12288
+#endif
+#define TCP_WND                         HANS_TCP_RX_WINDOW
+#define TCP_SND_BUF                     HANS_TCP_TX_WINDOW
+#define TCP_SND_QUEUELEN                HANS_TCP_SEND_QUEUE_LENGTH
 #define TCP_SNDLOWAT                    8192
 #define TCP_QUEUE_OOSEQ                 1
 #define LWIP_TCP_SACK_OUT               1
 #define LWIP_WND_SCALE                  1
-#define TCP_RCV_SCALE                   6
+#define TCP_RCV_SCALE                   8
 #define TCP_LISTEN_BACKLOG              1
 #define LWIP_TCP_KEEPALIVE              1
 #define LWIP_NETIF_TX_SINGLE_PBUF       0

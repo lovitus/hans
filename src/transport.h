@@ -65,6 +65,7 @@ public:
     static bool sequenceAfter(uint32_t first, uint32_t second);
     static bool acknowledged(uint32_t sequence, uint32_t ackSequence,
                              uint32_t ackBits);
+    static void advanceEchoToken(uint16_t &id, uint16_t &sequence);
 };
 
 class SequenceTracker
@@ -75,10 +76,74 @@ public:
     bool accept(uint32_t sequence);
     uint32_t ackSequence() const { return largest; }
     uint32_t ackBits() const { return receivedBits; }
+    uint64_t acceptedCount() const { return acceptedPackets; }
+    uint64_t duplicateCount() const { return duplicatePackets; }
+    uint64_t gapCount() const { return gapEvents; }
+    uint64_t missingCount() const { return missingPackets; }
+    uint64_t lateCount() const { return latePackets; }
 
 private:
     uint32_t largest;
     uint32_t receivedBits;
+    uint64_t acceptedPackets;
+    uint64_t duplicatePackets;
+    uint64_t gapEvents;
+    uint64_t missingPackets;
+    uint64_t latePackets;
+};
+
+class TransportReorderBuffer
+{
+public:
+    enum Action
+    {
+        HOLD_CURRENT,
+        DELIVER_CURRENT,
+        IGNORE_CURRENT
+    };
+
+    TransportReorderBuffer();
+
+    // Control packets are recorded as zero-copy ordering markers. Data takes
+    // the allocation-free DELIVER_CURRENT path unless it actually arrives
+    // ahead of a missing sequence.
+    Action observe(uint32_t sequence, bool isData, const char *data, int length,
+                   int64_t nowMilliseconds,
+                   std::vector<std::vector<char> > &ready);
+    bool flushExpired(int64_t nowMilliseconds,
+                      std::vector<std::vector<char> > &ready);
+    int waitMilliseconds(int64_t nowMilliseconds) const;
+    bool pending() const { return !items.empty(); }
+
+    uint64_t bufferedCount() const { return bufferedPackets; }
+    uint64_t releasedGapCount() const { return releasedGaps; }
+    uint64_t skippedCount() const { return skippedSequences; }
+    uint64_t lateReleaseCount() const { return lateReleases; }
+    size_t maximumDepth() const { return maxDepth; }
+
+private:
+    struct Item
+    {
+        uint32_t sequence;
+        bool isData;
+        std::vector<char> data;
+    };
+
+    static uint32_t nextSequence(uint32_t sequence);
+    size_t find(uint32_t sequence) const;
+    void drain(std::vector<std::vector<char> > &ready);
+    bool releaseGap(int64_t nowMilliseconds,
+                    std::vector<std::vector<char> > &ready);
+
+    bool initialized;
+    uint32_t expected;
+    int64_t gapSinceMilliseconds;
+    std::vector<Item> items;
+    uint64_t bufferedPackets;
+    uint64_t releasedGaps;
+    uint64_t skippedSequences;
+    uint64_t lateReleases;
+    size_t maxDepth;
 };
 
 class AdaptiveCredit

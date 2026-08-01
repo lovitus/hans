@@ -114,6 +114,8 @@ protected:
         SecureTransport secureTransport;
         uint32_t nextTransportSequence;
         SequenceTracker receivedSequences;
+        TransportReorderBuffer reorderBuffer;
+        Time lastTransportTelemetry;
         EchoId lastEcho;
         bool haveLastEcho;
         DirectAckTracker directUnacked;
@@ -151,6 +153,8 @@ protected:
                                 uint16_t id, uint16_t seq);
     virtual void handleTunData(int dataLength, uint32_t sourceIp, uint32_t destIp);
     virtual void handleTimeout();
+    virtual int idleIntervalMilliseconds() const;
+    virtual void handleIdle();
 
     virtual void run();
 
@@ -177,6 +181,9 @@ protected:
                                 uint16_t echoSeq);
     void handleClientData(ClientData *sourceClient, const char *packet,
                           int packetLength);
+    void deliverReorderedPackets(ClientData *client,
+                                 std::vector<std::vector<char> > &packets);
+    void logTransportTelemetry(ClientData *client);
     bool parseTransportHeader(ClientData *client, int &dataLength,
                               TransportV3::Header &transport);
     bool openV4Packet(ClientData *client, const TunnelHeader &header,
