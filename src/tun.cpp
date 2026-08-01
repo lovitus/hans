@@ -33,6 +33,7 @@
 #include <sstream>
 
 #ifdef LINUX
+#include <errno.h>
 #include <poll.h>
 #endif
 
