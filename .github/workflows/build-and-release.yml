@@ -48,8 +48,14 @@ jobs:
             make clean
             make test hans GPP='g++ -fsanitize=address,undefined -fno-omit-frame-pointer' \
               GCC='gcc -fsanitize=address,undefined -fno-omit-frame-pointer'
+            sanitizer_product="$(mktemp -d)"
+            chmod 755 "$sanitizer_product"
+            install -m 755 hans "$sanitizer_product/hans"
+            install -m 644 scripts/test-socks5-udp.py \
+              "$sanitizer_product/test-socks5-udp.py"
             sudo env ASAN_OPTIONS=detect_leaks=0 \
-              scripts/test-userspace.sh ./hans
+              scripts/test-userspace.sh "$sanitizer_product/hans"
+            rm -rf "$sanitizer_product"
             make clean
           fi
           make LDFLAGS=-static
