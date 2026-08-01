@@ -43,11 +43,18 @@ def main():
     payload = b"hans-socks5-udp-test-" + bytes(range(128))
     header = b"\x00\x00\x00\x01" + socket.inet_aton(target_ip) + struct.pack("!H", target_port)
     udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    udp.settimeout(5)
-    udp.sendto(header + payload, relay)
-    response, _ = udp.recvfrom(65535)
-    if response[:10] != header or response[10:] != payload:
-        raise RuntimeError("SOCKS5 UDP response did not match request")
+    udp.settimeout(2)
+    for attempt in range(3):
+        udp.sendto(header + payload, relay)
+        try:
+            response, _ = udp.recvfrom(65535)
+        except socket.timeout:
+            continue
+        if response[:10] != header or response[10:] != payload:
+            raise RuntimeError("SOCKS5 UDP response did not match request")
+        break
+    else:
+        raise RuntimeError("SOCKS5 UDP response timed out after 3 attempts")
     print("SOCKS5 UDP ASSOCIATE passed (%d payload bytes)" % len(payload))
 
 
