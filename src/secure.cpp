@@ -197,6 +197,17 @@ namespace
     }
 
 #ifdef __CYGWIN__
+    bool windowsPath(const std::string &path, std::vector<unsigned char> &converted)
+    {
+        ssize_t convertedSize = cygwin_conv_path(CCP_POSIX_TO_WIN_W,
+                                                  path.c_str(), NULL, 0);
+        if (convertedSize <= 0)
+            return false;
+        converted.resize((size_t)convertedSize);
+        return cygwin_conv_path(CCP_POSIX_TO_WIN_W, path.c_str(), &converted[0],
+                                converted.size()) == 0;
+    }
+
     bool isAllowedPrivateSid(PSID sid, PSID owner)
     {
         BYTE systemBuffer[SECURITY_MAX_SID_SIZE];
@@ -213,13 +224,8 @@ namespace
 
     bool hasPrivateWindowsAcl(const std::string &path)
     {
-        ssize_t convertedSize = cygwin_conv_path(CCP_POSIX_TO_WIN_W,
-                                                  path.c_str(), NULL, 0);
-        if (convertedSize <= 0)
-            return false;
-        std::vector<unsigned char> converted((size_t)convertedSize);
-        if (cygwin_conv_path(CCP_POSIX_TO_WIN_W, path.c_str(), &converted[0],
-                            converted.size()) != 0)
+        std::vector<unsigned char> converted;
+        if (!windowsPath(path, converted))
             return false;
 
         PSID owner = NULL;
@@ -265,6 +271,66 @@ namespace
         }
         LocalFree(descriptor);
         return privateAcl;
+    }
+
+    bool setPrivateWindowsAcl(const std::string &path)
+    {
+        std::vector<unsigned char> converted;
+        if (!windowsPath(path, converted))
+            return false;
+
+        PSID owner = NULL;
+        PSECURITY_DESCRIPTOR descriptor = NULL;
+        DWORD result = GetNamedSecurityInfoW(
+            reinterpret_cast<LPWSTR>(&converted[0]), SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION, &owner, NULL, NULL, NULL, &descriptor);
+        if (result != ERROR_SUCCESS || owner == NULL)
+        {
+            if (descriptor != NULL)
+                LocalFree(descriptor);
+            return false;
+        }
+
+        BYTE systemBuffer[SECURITY_MAX_SID_SIZE];
+        BYTE administratorsBuffer[SECURITY_MAX_SID_SIZE];
+        DWORD systemSize = sizeof(systemBuffer);
+        DWORD administratorsSize = sizeof(administratorsBuffer);
+        if (!CreateWellKnownSid(WinLocalSystemSid, NULL, systemBuffer, &systemSize) ||
+            !CreateWellKnownSid(WinBuiltinAdministratorsSid, NULL,
+                                administratorsBuffer, &administratorsSize))
+        {
+            LocalFree(descriptor);
+            return false;
+        }
+
+        EXPLICIT_ACCESSW access[3];
+        ZeroMemory(access, sizeof(access));
+        PSID principals[3] = { owner, systemBuffer, administratorsBuffer };
+        TRUSTEE_TYPE types[3] = { TRUSTEE_IS_USER, TRUSTEE_IS_USER,
+                                  TRUSTEE_IS_GROUP };
+        for (int i = 0; i < 3; ++i)
+        {
+            access[i].grfAccessPermissions = GENERIC_ALL;
+            access[i].grfAccessMode = SET_ACCESS;
+            access[i].grfInheritance = NO_INHERITANCE;
+            access[i].Trustee.TrusteeForm = TRUSTEE_IS_SID;
+            access[i].Trustee.TrusteeType = types[i];
+            access[i].Trustee.ptstrName = reinterpret_cast<LPWSTR>(principals[i]);
+        }
+
+        PACL privateAcl = NULL;
+        result = SetEntriesInAclW(3, access, NULL, &privateAcl);
+        if (result == ERROR_SUCCESS)
+        {
+            result = SetNamedSecurityInfoW(
+                reinterpret_cast<LPWSTR>(&converted[0]), SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                NULL, NULL, privateAcl, NULL);
+        }
+        if (privateAcl != NULL)
+            LocalFree(privateAcl);
+        LocalFree(descriptor);
+        return result == ERROR_SUCCESS;
     }
 #endif
 
@@ -326,6 +392,17 @@ void SecureIdentity::loadOrCreate(const std::string &path)
         fd = open(path.c_str(), createFlags, 0600);
         if (fd < 0)
             throw Exception("could not create secure identity file", true);
+#ifdef __CYGWIN__
+        // Do this before writing any secret bytes: a workspace or download
+        // directory can otherwise contribute a broadly readable inherited ACL.
+        if (!setPrivateWindowsAcl(path))
+        {
+            close(fd);
+            unlink(path.c_str());
+            crypto_wipe(secret, sizeof(secret));
+            throw Exception("could not secure Windows identity file ACL");
+        }
+#endif
         size_t offset = 0;
         while (offset < sizeof(secret))
         {
