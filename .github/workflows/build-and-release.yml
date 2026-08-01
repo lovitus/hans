@@ -46,7 +46,7 @@ jobs:
           make test
           if [ "${{ matrix.label }}" = "amd64-ubuntu24.04" ]; then
             make clean
-            make test GPP='g++ -fsanitize=address,undefined -fno-omit-frame-pointer' \
+            make test hans GPP='g++ -fsanitize=address,undefined -fno-omit-frame-pointer' \
               GCC='gcc -fsanitize=address,undefined -fno-omit-frame-pointer'
             sudo env ASAN_OPTIONS=detect_leaks=0 \
               scripts/test-userspace.sh ./hans

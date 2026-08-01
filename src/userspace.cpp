@@ -351,8 +351,10 @@ public:
     static err_t acceptShared(void *arg, struct tcp_pcb *newPcb, err_t error)
     {
         SharedListener *listener = static_cast<SharedListener *>(arg);
-        if (error != ERR_OK || newPcb == NULL)
-            return error == ERR_OK ? ERR_ARG : error;
+        if (error != ERR_OK)
+            return error;
+        if (newPcb == NULL)
+            return ERR_ARG;
         Connection *connection = new Connection(listener->owner, CONNECTION_SHARE);
         connection->pcb = newPcb;
         tcp_backlog_accepted(newPcb);
@@ -1076,7 +1078,7 @@ public:
         connection->udpClient = source;
         connection->udpClientKnown = true;
 
-        uint32_t ip;
+        uint32_t ip = 0;
         uint16_t port;
         size_t headerLength;
         if (!parseUdpTarget(data, (size_t)length, ip, port, headerLength) ||
