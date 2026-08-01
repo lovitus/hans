@@ -40,7 +40,7 @@ jobs:
       - name: Install toolchain
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq build-essential net-tools
+          sudo apt-get install -y -qq build-essential net-tools curl iproute2 iptables python3 util-linux
       - name: Build
         run: |
           make test
@@ -48,6 +48,8 @@ jobs:
             make clean
             make test GPP='g++ -fsanitize=address,undefined -fno-omit-frame-pointer' \
               GCC='gcc -fsanitize=address,undefined -fno-omit-frame-pointer'
+            sudo env ASAN_OPTIONS=detect_leaks=0 \
+              scripts/test-userspace.sh ./hans
             make clean
           fi
           make LDFLAGS=-static

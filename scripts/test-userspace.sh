@@ -189,6 +189,15 @@ ip netns exec "$server_ns" curl --fail --silent --show-error --max-time 20 \
     http://10.77.88.100:18086/$(basename "$BINABS") -o "$work/allports-download"
 cmp "$BINABS" "$work/allports-download"
 
+# A fallback connection whose same-numbered loopback service is closed must
+# fail cleanly without damaging the wildcard listener or the client process.
+if ip netns exec "$server_ns" curl --fail --silent --show-error --max-time 5 \
+    http://10.77.88.100:18088/ >"$work/allports-closed.out" 2>&1; then
+    echo "closed allports target unexpectedly accepted a connection" >&2
+    exit 1
+fi
+kill -0 "$client_pid"
+
 # Drive more than 65535 bytes from VPN to the local socket in a single flow.
 # This catches truncated tcp_recved() window credits, which otherwise stall a
 # fast connection after its advertised receive window is exhausted.

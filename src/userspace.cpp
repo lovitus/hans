@@ -351,8 +351,8 @@ public:
     static err_t acceptShared(void *arg, struct tcp_pcb *newPcb, err_t error)
     {
         SharedListener *listener = static_cast<SharedListener *>(arg);
-        if (error != ERR_OK)
-            return error;
+        if (error != ERR_OK || newPcb == NULL)
+            return error == ERR_OK ? ERR_ARG : error;
         Connection *connection = new Connection(listener->owner, CONNECTION_SHARE);
         connection->pcb = newPcb;
         tcp_backlog_accepted(newPcb);
