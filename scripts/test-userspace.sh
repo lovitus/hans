@@ -228,4 +228,13 @@ done
 
 kill -0 "$server_pid"
 kill -0 "$client_pid"
+
+# Teardown is part of the product contract. Waiting here is important: merely
+# sending SIGTERM lets a userspace-client destructor crash go unnoticed.
+kill "$client_pid"
+if ! wait "$client_pid"; then
+    echo "userspace client did not exit cleanly" >&2
+    exit 1
+fi
+client_pid=
 echo "OK: unprivileged SOCKS5 TCP/UDP, explicit sharing, and allports tests passed"

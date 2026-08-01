@@ -180,18 +180,25 @@ public:
 
     ~Impl()
     {
+        /* lwIP uses process-wide pools, and the client owns the only Impl for
+         * the lifetime of the process.  Do not walk the raw TCP/UDP PCBs here:
+         * a peer may have invalidated a queued pbuf immediately before
+         * shutdown, and tcp_abort() would dereference that stale queue while
+         * there is no event loop left to finish protocol cleanup.  The OS will
+         * reclaim the lwIP pools; only host descriptors need explicit close. */
         for (size_t i = 0; i < connections.size(); ++i)
-            destroyConnection(connections[i], true);
-        for (size_t i = 0; i < sharedListeners.size(); ++i)
         {
-            if (sharedListeners[i]->pcb != NULL)
-                tcp_close(sharedListeners[i]->pcb);
-            delete sharedListeners[i];
+            Connection *connection = connections[i];
+            if (connection->fd >= 0)
+                close(connection->fd);
+            if (connection->udpFd >= 0)
+                close(connection->udpFd);
+            delete connection;
         }
+        for (size_t i = 0; i < sharedListeners.size(); ++i)
+            delete sharedListeners[i];
         if (socksFd >= 0)
             close(socksFd);
-        if (configured)
-            netif_remove(&interface);
     }
 
     static err_t netifInit(struct netif *netif)
