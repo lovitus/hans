@@ -188,6 +188,7 @@ bool SequenceTracker::accept(uint32_t sequence)
 TransportReorderBuffer::TransportReorderBuffer()
 {
     initialized = false;
+    enabled = false;
     expected = 0;
     gapSinceMilliseconds = 0;
     bufferedPackets = 0;
@@ -286,6 +287,15 @@ TransportReorderBuffer::Action TransportReorderBuffer::observe(
     expected = nextSequence(sequence);
     return isData ? DELIVER_CURRENT : IGNORE_CURRENT;
 #else
+    // Do not turn ordinary loss into head-of-line blocking. The caller enables
+    // buffering only after its sequence tracker has observed a packet that
+    // really arrived late, proving that this peer/path can reorder traffic.
+    if (!enabled)
+    {
+        expected = nextSequence(sequence);
+        return isData ? DELIVER_CURRENT : IGNORE_CURRENT;
+    }
+
     if (sequence == expected)
     {
         expected = nextSequence(expected);

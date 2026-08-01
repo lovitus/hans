@@ -93,28 +93,37 @@ static void testTransportReordering()
     std::vector<char> e = packet("e");
     std::vector<char> f = packet("f");
 
+    // Loss alone is passed through. Buffering is armed only after the caller's
+    // sequence tracker has proven that this peer/path delivers packets late.
     assert(reorder.observe(10, true, &a[0], a.size(), 100, ready) ==
            TransportReorderBuffer::DELIVER_CURRENT);
+    assert(reorder.observe(12, true, &c[0], c.size(), 100, ready) ==
+           TransportReorderBuffer::DELIVER_CURRENT);
+    assert(!reorder.pending());
+    reorder.enable();
+    assert(reorder.isEnabled());
+    assert(reorder.observe(20, true, &a[0], a.size(), 100, ready) ==
+           TransportReorderBuffer::DELIVER_CURRENT);
     assert(ready.empty());
-    assert(reorder.observe(12, true, &c[0], c.size(), 101, ready) ==
+    assert(reorder.observe(22, true, &c[0], c.size(), 101, ready) ==
            TransportReorderBuffer::HOLD_CURRENT);
     assert(reorder.pending());
     assert(reorder.waitMilliseconds(101) > 0);
-    assert(reorder.observe(11, true, &b[0], b.size(), 101, ready) ==
+    assert(reorder.observe(21, true, &b[0], b.size(), 101, ready) ==
            TransportReorderBuffer::DELIVER_CURRENT);
     assert(ready.size() == 1 && ready[0] == c);
     ready.clear();
 
     // A control marker participates in sequence ordering without copying a
     // payload or appearing in the data-ready list.
-    assert(reorder.observe(14, false, NULL, 0, 102, ready) ==
+    assert(reorder.observe(24, false, NULL, 0, 102, ready) ==
            TransportReorderBuffer::HOLD_CURRENT);
     std::vector<char> d = packet("d");
-    assert(reorder.observe(13, true, &d[0], d.size(), 102, ready) ==
+    assert(reorder.observe(23, true, &d[0], d.size(), 102, ready) ==
            TransportReorderBuffer::DELIVER_CURRENT);
     assert(ready.empty());
 
-    assert(reorder.observe(16, true, &f[0], f.size(), 103, ready) ==
+    assert(reorder.observe(26, true, &f[0], f.size(), 103, ready) ==
            TransportReorderBuffer::HOLD_CURRENT);
     assert(!reorder.flushExpired(104, ready));
     assert(reorder.flushExpired(105, ready));
@@ -125,7 +134,7 @@ static void testTransportReordering()
 
     // A packet arriving after the bounded wait is released immediately so a
     // delayed packet is not silently discarded by the reorder layer.
-    assert(reorder.observe(15, true, &e[0], e.size(), 106, ready) ==
+    assert(reorder.observe(25, true, &e[0], e.size(), 106, ready) ==
            TransportReorderBuffer::DELIVER_CURRENT);
     assert(reorder.lateReleaseCount() == 1);
     assert(reorder.maximumDepth() == 1);

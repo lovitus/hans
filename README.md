@@ -64,9 +64,10 @@ deployment, compatibility, and peer-management features:
   submit/receive them with batched syscalls. It remains one thread and processes
   every received datagram synchronously; control packets are flushed at the end
   of the same event-loop iteration rather than waiting for a batch timer. A
-  per-peer data-only reorder layer holds at most 32 genuinely early packets for
-  2 ms. In-order traffic is passed through without allocation or delay, and
-  control messages are never delayed.
+  per-peer data-only reorder layer activates only after a late packet proves
+  that the path really reorders traffic, then holds at most 32 genuinely early
+  packets for 2 ms. Pure loss, in-order traffic, and control messages are
+  passed through without buffering or delay.
 - **Server mode is Linux-only** (it relies on Linux-specific networking
   behavior). **Client mode** works on Linux, FreeBSD, OpenBSD, NetBSD, macOS
   and Windows (via Cygwin).

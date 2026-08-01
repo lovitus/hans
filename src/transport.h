@@ -103,6 +103,17 @@ public:
     };
 
     TransportReorderBuffer();
+    void enable()
+    {
+        if (!enabled)
+        {
+            enabled = true;
+            initialized = false;
+            expected = 0;
+            gapSinceMilliseconds = 0;
+        }
+    }
+    bool isEnabled() const { return enabled; }
 
     // Control packets are recorded as zero-copy ordering markers. Data takes
     // the allocation-free DELIVER_CURRENT path unless it actually arrives
@@ -136,6 +147,7 @@ private:
                     std::vector<std::vector<char> > &ready);
 
     bool initialized;
+    bool enabled;
     uint32_t expected;
     int64_t gapSinceMilliseconds;
     std::vector<Item> items;
