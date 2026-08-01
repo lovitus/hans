@@ -318,13 +318,13 @@ bool Client::handleEchoData(const TunnelHeader &header, int dataLength,
     {
         if (!parseTransportHeader(dataLength, transport, id, seq))
             return true;
-        if (receivedSequences.lateCount() != 0)
-            reorderBuffer.enable();
         bool isData = header.type == TunnelHeader::TYPE_DATA;
         reorderAction = reorderBuffer.observe(
             transport.txSequence, isData,
             echoReceivePayloadBuffer() + TransportV3::HEADER_SIZE,
             dataLength, now.milliseconds(), reorderedPackets);
+        if (receivedSequences.lateCount() != 0)
+            reorderBuffer.enable();
         if (!isData)
             deliverReorderedPackets(reorderedPackets);
         logTransportTelemetry();

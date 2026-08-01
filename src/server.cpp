@@ -569,8 +569,6 @@ bool Server::handleEchoData(const TunnelHeader &header, int dataLength,
         TransportV3::Header transport;
         if (!parseTransportHeader(client, dataLength, transport))
             return true;
-        if (client->receivedSequences.lateCount() != 0)
-            client->reorderBuffer.enable();
         vector<vector<char> > reorderedPackets;
         bool isData = header.type == TunnelHeader::TYPE_DATA;
         TransportReorderBuffer::Action reorderAction =
@@ -578,6 +576,8 @@ bool Server::handleEchoData(const TunnelHeader &header, int dataLength,
                 transport.txSequence, isData,
                 echoReceivePayloadBuffer() + TransportV3::HEADER_SIZE,
                 dataLength, now.milliseconds(), reorderedPackets);
+        if (client->receivedSequences.lateCount() != 0)
+            client->reorderBuffer.enable();
         if (!isData)
             deliverReorderedPackets(client, reorderedPackets);
         logTransportTelemetry(client);
@@ -680,13 +680,13 @@ bool Server::handleEchoData(const TunnelHeader &header, int dataLength,
     {
         if (!parseTransportHeader(client, dataLength, transport))
             return true;
-        if (client->receivedSequences.lateCount() != 0)
-            client->reorderBuffer.enable();
         bool isData = header.type == TunnelHeader::TYPE_DATA;
         reorderAction = client->reorderBuffer.observe(
             transport.txSequence, isData,
             echoReceivePayloadBuffer() + TransportV3::HEADER_SIZE,
             dataLength, now.milliseconds(), reorderedPackets);
+        if (client->receivedSequences.lateCount() != 0)
+            client->reorderBuffer.enable();
         if (!isData)
             deliverReorderedPackets(client, reorderedPackets);
         logTransportTelemetry(client);
