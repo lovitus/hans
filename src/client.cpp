@@ -521,7 +521,16 @@ void Client::sendV3ToServer(Worker::TunnelHeader::Type type, int dataLength,
                             uint8_t flags, bool trackPoll)
 {
     char *payload = echoSendPayloadBuffer();
-    if (dataLength > 0)
+    char *transportPayload = payload;
+    if (protocolVersion == 4)
+    {
+        if (dataLength > 0)
+            memmove(payload + SecureTransport::PREFIX_SIZE +
+                            TransportV3::HEADER_SIZE,
+                    payload, dataLength);
+        transportPayload += SecureTransport::PREFIX_SIZE;
+    }
+    else if (dataLength > 0)
         memmove(payload + TransportV3::HEADER_SIZE, payload, dataLength);
 
     TransportV3::Header transport;
@@ -535,7 +544,7 @@ void Client::sendV3ToServer(Worker::TunnelHeader::Type type, int dataLength,
     transport.ackSequence = receivedSequences.ackSequence();
     transport.ackBits = receivedSequences.ackBits();
     transport.timestamp = (uint16_t)((now.milliseconds() / 16) & 0xffff);
-    TransportV3::encode(payload, transport);
+    TransportV3::encode(transportPayload, transport);
 
     uint16_t sentId = nextEchoId;
     uint16_t sentSeq = nextEchoSequence;
@@ -545,12 +554,11 @@ void Client::sendV3ToServer(Worker::TunnelHeader::Type type, int dataLength,
         TunnelHeader ad;
         ad.magic = clientMagic();
         ad.type = type;
-        std::vector<uint8_t> packet;
-        if (!secureTransport.seal((const uint8_t *)&ad, sizeof(ad),
-                                  (const uint8_t *)payload, wireLength, packet))
+        if (!secureTransport.sealPrepared(
+                (const uint8_t *)&ad, sizeof(ad), (uint8_t *)payload,
+                wireLength, payloadBufferSize()))
             throw Exception("encrypting tunnel packet");
-        memcpy(payload, &packet[0], packet.size());
-        wireLength = packet.size();
+        wireLength += SecureTransport::OVERHEAD;
     }
     sendEchoToServer(type, wireLength);
     // Adaptive credits need a unique request token so replies can be matched
@@ -569,17 +577,15 @@ bool Client::openV4Packet(const TunnelHeader &header, int &dataLength)
     if (dataLength < 4 || get32(echoReceivePayloadBuffer()) !=
                           localReceiverIndex)
         return false;
-    std::vector<uint8_t> plain;
-    if (!secureTransport.open((const uint8_t *)&header, sizeof(header),
-                              (const uint8_t *)echoReceivePayloadBuffer(),
-                              dataLength, plain))
+    size_t plainLength = 0;
+    if (!secureTransport.openInPlace(
+            (const uint8_t *)&header, sizeof(header),
+            (uint8_t *)echoReceivePayloadBuffer(), dataLength, plainLength))
     {
         syslog(LOG_WARNING, "discarding unauthenticated protocol v4 packet");
         return false;
     }
-    if (!plain.empty())
-        memcpy(echoReceivePayloadBuffer(), &plain[0], plain.size());
-    dataLength = plain.size();
+    dataLength = (int)plainLength;
     return true;
 }
 

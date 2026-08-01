@@ -22,6 +22,7 @@ deployment, compatibility, and peer-management features:
 | Adaptive transport | Protocol v3 starts with conservative echo-request credits, measures reply RTT and server backlog, and adjusts the credit count instead of requiring a guessed `-w` window. |
 | Adaptive timing and MTU | Retransmission timeout follows RFC 6298-style smoothed RTT/variance with bounded exponential backoff. v4 peers negotiate the smaller configured inner MTU and lower the server interface conservatively, so differently configured peers do not silently overrun one another. |
 | Direct-reply upgrade and fallback | A client probes whether the path safely passes multiple replies for one echo request. A successful path upgrades to direct replies; sequence/ACK tracking and heartbeats automatically return it to adaptive credits if that path stops working, then probe it again after a quiet interval. |
+| Low-risk Linux fast path | Linux keeps the single-threaded packet/state owner but uses opportunistic `recvmmsg`/`sendmmsg` batches, bounded TUN queue draining, in-place v4 AEAD, and preallocated contiguous direct-ACK tracking. Packets are never coalesced, batching never waits to fill, and unsupported kernels automatically retain the portable one-packet syscall path. |
 | Adapter-free userspace client | `--feature userspace` replaces TUN/TAP with a statically embedded lwIP stack. It exposes SOCKS5 TCP/UDP access and selected inbound ports while preserving the client's sticky VPN identity and tunnel IP. The normal kernel-interface path is unchanged unless this feature is explicitly selected. |
 | Backward-compatible protocol | New servers still accept v1/v2/v3 clients. New clients try encrypted v4 first, then fall back for older servers unless `--require-v4` is set. `--server-fingerprint` pins the expected server key and prevents impersonation by another member of the same PSK group. |
 | Broad release matrix | GitHub Actions builds Linux, macOS, Windows/Cygwin (amd64 and legacy i386), FreeBSD, OpenBSD, and NetBSD binaries for the CPU architectures supported by the codebase. |
@@ -59,6 +60,10 @@ deployment, compatibility, and peer-management features:
   direct replies when possible. Every v3 packet carries a session ID, sequence,
   rolling ACK bitmap, and queue feedback; missed direct heartbeats trigger a
   conservative credit-mode fallback, with a later probe to recover direct mode.
+- On Linux the event loop may drain up to 16 packets that are already ready and
+  submit/receive them with batched syscalls. It remains one thread and processes
+  every datagram in order; control packets are flushed at the end of the same
+  event-loop iteration rather than waiting for a batch timer.
 - **Server mode is Linux-only** (it relies on Linux-specific networking
   behavior). **Client mode** works on Linux, FreeBSD, OpenBSD, NetBSD, macOS
   and Windows (via Cygwin).

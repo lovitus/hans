@@ -147,6 +147,7 @@ void Worker::run()
                 return;
         }
         now = Time::now();
+        echo.beginBatch();
 
         // icmp data
         int readyEchoFd = FD_ISSET(echo.getFd(), &readSet) ? echo.getFd() :
@@ -155,13 +156,14 @@ void Worker::run()
                            echo.getIpv6Fd() : -1);
         if (readyEchoFd >= 0)
         {
-            bool reply;
-            uint16_t id, seq;
-            Echo::Address address;
-
-            int dataLength = echo.receive(readyEchoFd, address, reply, id, seq);
-            if (dataLength != -1)
+            Echo::ReceivedPacket packets[Echo::MAX_BATCH_PACKETS];
+            int packetCount = echo.receiveMany(readyEchoFd, packets,
+                                                Echo::MAX_BATCH_PACKETS);
+            for (int packetIndex = 0; packetIndex < packetCount; ++packetIndex)
             {
+                Echo::ReceivedPacket &packet = packets[packetIndex];
+                echo.selectReceivedPacket(packet.bufferIndex);
+                int dataLength = packet.length;
                 bool valid = dataLength >= sizeof(TunnelHeader);
 
                 if (valid)
@@ -171,16 +173,19 @@ void Worker::run()
                     DEBUG_ONLY(
                         cout << "received: type " << header->type
                              << ", length " << dataLength - sizeof(TunnelHeader)
-                             << ", id " << id << ", seq " << seq << endl);
+                             << ", id " << packet.id << ", seq "
+                             << packet.seq << endl);
 
                     valid = handleEchoData(*header, dataLength - sizeof(TunnelHeader),
-                                           address, reply, id, seq);
+                                           packet.address, packet.reply,
+                                           packet.id, packet.seq);
                 }
 
-                if (!valid && !reply && answerEcho)
+                if (!valid && !packet.reply && answerEcho)
                 {
                     memcpy(echo.sendPayloadBuffer(), echo.receivePayloadBuffer(), dataLength);
-                    echo.send(dataLength, address, true, id, seq);
+                    echo.send(dataLength, packet.address, true,
+                              packet.id, packet.seq);
                 }
             }
         }
@@ -188,15 +193,20 @@ void Worker::run()
         // data from tun
         if (tun.getFd() >= 0 && FD_ISSET(tun.getFd(), &readSet))
         {
-            uint32_t sourceIp, destIp;
+            int packetCount = 0;
+            do
+            {
+                uint32_t sourceIp, destIp;
+                int dataLength = tun.read(echoSendPayloadBuffer(), sourceIp, destIp);
 
-            int dataLength = tun.read(echoSendPayloadBuffer(), sourceIp, destIp);
+                if (dataLength == 0)
+                    throw Exception("tunnel closed");
 
-            if (dataLength == 0)
-                throw Exception("tunnel closed");
-
-            if (dataLength != -1)
-                handleTunData(dataLength, sourceIp, destIp);
+                if (dataLength != -1)
+                    handleTunData(dataLength, sourceIp, destIp);
+                ++packetCount;
+            }
+            while (packetCount < Echo::MAX_BATCH_PACKETS && tun.hasPendingRead());
         }
 
         handleFileDescriptors(readSet, writeSet);
@@ -208,6 +218,7 @@ void Worker::run()
             nextTimeout = Time::ZERO;
             handleTimeout();
         }
+        echo.endBatch();
     }
 }
 

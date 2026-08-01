@@ -15,6 +15,11 @@
 
 namespace
 {
+    const size_t DIRECT_ACK_RESERVE = 512;
+}
+
+namespace
+{
     void put16(char *buffer, uint16_t value)
     {
         value = htons(value);
@@ -147,6 +152,68 @@ bool SequenceTracker::accept(uint32_t sequence)
         return false;
     receivedBits |= bit;
     return true;
+}
+
+DirectAckTracker::DirectAckTracker()
+{
+    entries.reserve(DIRECT_ACK_RESERVE);
+}
+
+DirectAckTracker::DirectAckTracker(const DirectAckTracker &other)
+    : entries(other.entries)
+{
+    if (entries.capacity() < DIRECT_ACK_RESERVE)
+        entries.reserve(DIRECT_ACK_RESERVE);
+}
+
+DirectAckTracker &DirectAckTracker::operator=(const DirectAckTracker &other)
+{
+    if (this != &other)
+    {
+        entries = other.entries;
+        if (entries.capacity() < DIRECT_ACK_RESERVE)
+            entries.reserve(DIRECT_ACK_RESERVE);
+    }
+    return *this;
+}
+
+void DirectAckTracker::record(uint32_t sequence, int64_t sentMilliseconds)
+{
+    Entry entry;
+    entry.sequence = sequence;
+    entry.sentMilliseconds = sentMilliseconds;
+    entries.push_back(entry);
+}
+
+void DirectAckTracker::acknowledge(uint32_t ackSequence, uint32_t ackBits)
+{
+    size_t writeIndex = 0;
+    for (size_t readIndex = 0; readIndex < entries.size(); ++readIndex)
+    {
+        const Entry &entry = entries[readIndex];
+        bool beyondAckWindow = ackSequence != 0 &&
+            TransportV3::sequenceAfter(ackSequence, entry.sequence) &&
+            ackSequence - entry.sequence > 32;
+        if (beyondAckWindow ||
+            TransportV3::acknowledged(entry.sequence, ackSequence, ackBits))
+            continue;
+        if (writeIndex != readIndex)
+            entries[writeIndex] = entry;
+        ++writeIndex;
+    }
+    entries.resize(writeIndex);
+}
+
+bool DirectAckTracker::failed(int64_t nowMilliseconds,
+                              size_t minimumOutstanding,
+                              int timeoutMilliseconds) const
+{
+    if (entries.size() < minimumOutstanding)
+        return false;
+    for (size_t i = 0; i < entries.size(); ++i)
+        if (nowMilliseconds > entries[i].sentMilliseconds + timeoutMilliseconds)
+            return true;
+    return false;
 }
 
 AdaptiveCredit::AdaptiveCredit(int minimum, int maximum, int initial)

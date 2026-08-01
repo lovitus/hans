@@ -1039,7 +1039,16 @@ void Server::sendV3ToClient(ClientData *client, TunnelHeader::Type type,
     }
 
     char *payload = echoSendPayloadBuffer();
-    if (dataLength > 0)
+    char *transportPayload = payload;
+    if (client->protocolVersion == 4)
+    {
+        if (dataLength > 0)
+            memmove(payload + SecureTransport::PREFIX_SIZE +
+                            TransportV3::HEADER_SIZE,
+                    payload, dataLength);
+        transportPayload += SecureTransport::PREFIX_SIZE;
+    }
+    else if (dataLength > 0)
         memmove(payload + TransportV3::HEADER_SIZE, payload, dataLength);
 
     TransportV3::Header transport;
@@ -1059,7 +1068,7 @@ void Server::sendV3ToClient(ClientData *client, TunnelHeader::Type type,
                               (uint16_t)queuedPackets;
     client->backlogHint = 0;
     transport.timestamp = (uint16_t)((now.milliseconds() / 16) & 0xffff);
-    TransportV3::encode(payload, transport);
+    TransportV3::encode(transportPayload, transport);
 
     int wireLength = dataLength + TransportV3::HEADER_SIZE;
     const TunnelHeader::Magic *wireMagic = &v3Magic;
@@ -1068,13 +1077,11 @@ void Server::sendV3ToClient(ClientData *client, TunnelHeader::Type type,
         TunnelHeader ad;
         ad.magic = v4Magic;
         ad.type = type;
-        std::vector<uint8_t> packet;
-        if (!client->secureTransport.seal((const uint8_t *)&ad, sizeof(ad),
-                                          (const uint8_t *)payload,
-                                          wireLength, packet))
+        if (!client->secureTransport.sealPrepared(
+                (const uint8_t *)&ad, sizeof(ad), (uint8_t *)payload,
+                wireLength, payloadBufferSize()))
             return;
-        memcpy(payload, &packet[0], packet.size());
-        wireLength = packet.size();
+        wireLength += SecureTransport::OVERHEAD;
         wireMagic = &v4Magic;
     }
 
@@ -1083,20 +1090,18 @@ void Server::sendV3ToClient(ClientData *client, TunnelHeader::Type type,
 
     if (!forceEcho && client->transportMode == TransportV3::MODE_DIRECT &&
         type == TunnelHeader::TYPE_DATA)
-        client->directUnacked[transport.txSequence] = now;
+        client->directUnacked.record(transport.txSequence, now.milliseconds());
 }
 
 bool Server::openV4Packet(ClientData *client, const TunnelHeader &header,
                           int &dataLength, const Echo::Address &realAddress)
 {
-    std::vector<uint8_t> plain;
-    if (!client->secureTransport.open((const uint8_t *)&header, sizeof(header),
-                                      (const uint8_t *)echoReceivePayloadBuffer(),
-                                      dataLength, plain))
+    size_t plainLength = 0;
+    if (!client->secureTransport.openInPlace(
+            (const uint8_t *)&header, sizeof(header),
+            (uint8_t *)echoReceivePayloadBuffer(), dataLength, plainLength))
         return false;
-    if (!plain.empty())
-        memcpy(echoReceivePayloadBuffer(), &plain[0], plain.size());
-    dataLength = plain.size();
+    dataLength = (int)plainLength;
 
     // The receiver index and AEAD authenticate this peer, so a changed source
     // address is safe to adopt after (and only after) successful decryption.
@@ -1131,12 +1136,15 @@ void Server::sendV4RawToClient(ClientData *client, TunnelHeader::Type type,
     TunnelHeader ad;
     ad.magic = v4Magic;
     ad.type = type;
-    std::vector<uint8_t> packet;
-    if (!client->secureTransport.seal((const uint8_t *)&ad, sizeof(ad),
-                                      (const uint8_t *)data, dataLength, packet))
+    char *payload = echoSendPayloadBuffer();
+    if (dataLength > 0)
+        memcpy(payload + SecureTransport::PREFIX_SIZE, data, dataLength);
+    if (!client->secureTransport.sealPrepared(
+            (const uint8_t *)&ad, sizeof(ad), (uint8_t *)payload,
+            dataLength, payloadBufferSize()))
         return;
-    memcpy(echoSendPayloadBuffer(), &packet[0], packet.size());
-    sendEcho(v4Magic, type, packet.size(), client->realAddress, true,
+    sendEcho(v4Magic, type, dataLength + SecureTransport::OVERHEAD,
+             client->realAddress, true,
              echoId, echoSeq);
 }
 
@@ -1169,35 +1177,15 @@ bool Server::parseTransportHeader(ClientData *client, int &dataLength,
 void Server::processTransportAck(ClientData *client,
                                  const TransportV3::Header &transport)
 {
-    std::map<uint32_t, Time>::iterator it = client->directUnacked.begin();
-    while (it != client->directUnacked.end())
-    {
-        std::map<uint32_t, Time>::iterator current = it++;
-        bool beyondAckWindow = transport.ackSequence != 0 &&
-                               TransportV3::sequenceAfter(
-                                   transport.ackSequence, current->first) &&
-                               transport.ackSequence - current->first > 32;
-        if (beyondAckWindow ||
-            TransportV3::acknowledged(current->first,
-                                      transport.ackSequence,
-                                      transport.ackBits))
-            client->directUnacked.erase(current);
-    }
+    client->directUnacked.acknowledge(transport.ackSequence,
+                                      transport.ackBits);
 }
 
 bool Server::directPathFailed(ClientData *client) const
 {
-    if ((int)client->directUnacked.size() < DIRECT_UNACKED_LIMIT)
-        return false;
-
-    for (std::map<uint32_t, Time>::const_iterator it =
-             client->directUnacked.begin();
-         it != client->directUnacked.end(); ++it)
-    {
-        if (now > it->second + Time(DIRECT_ACK_TIMEOUT_MS))
-            return true;
-    }
-    return false;
+    return client->directUnacked.failed(now.milliseconds(),
+                                        DIRECT_UNACKED_LIMIT,
+                                        DIRECT_ACK_TIMEOUT_MS);
 }
 
 void Server::releaseTunnelIp(uint32_t tunnelIp, const string &deviceId)

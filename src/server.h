@@ -116,7 +116,7 @@ protected:
         SequenceTracker receivedSequences;
         EchoId lastEcho;
         bool haveLastEcho;
-        std::map<uint32_t, Time> directUnacked;
+        DirectAckTracker directUnacked;
         unsigned int backlogHint;
 
         std::queue<Packet> pendingPackets;

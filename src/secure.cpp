@@ -783,15 +783,10 @@ bool SecureTransport::seal(const uint8_t *ad, size_t adLength,
                            const uint8_t *plain, size_t plainLength,
                            std::vector<uint8_t> &packet)
 {
-    if (!initialized || sendCounter == ~(uint64_t)0)
-        return false;
     packet.resize(OVERHEAD + plainLength);
-    put32(&packet[0], sendIndex);
-    put64le(&packet[4], sendCounter);
-    chachaPolyLock(&packet[PREFIX_SIZE], &packet[PREFIX_SIZE + plainLength],
-                   sendKeyValue, sendCounter, ad, adLength, plain, plainLength);
-    sendCounter++;
-    return true;
+    if (plainLength != 0)
+        memcpy(&packet[PREFIX_SIZE], plain, plainLength);
+    return sealPrepared(ad, adLength, &packet[0], plainLength, packet.size());
 }
 
 bool SecureTransport::open(const uint8_t *ad, size_t adLength,
@@ -811,6 +806,49 @@ bool SecureTransport::open(const uint8_t *ad, size_t adLength,
                           receiveKeyValue, counter, ad, adLength,
                           packet + PREFIX_SIZE, plainLength))
         return false;
+    replay.accept(counter);
+    return true;
+}
+
+bool SecureTransport::sealPrepared(const uint8_t *ad, size_t adLength,
+                                   uint8_t *packet, size_t plainLength,
+                                   size_t packetCapacity)
+{
+    if (!initialized || sendCounter == ~(uint64_t)0 || packet == NULL ||
+        packetCapacity < OVERHEAD + plainLength)
+        return false;
+    put32(packet, sendIndex);
+    put64le(packet + 4, sendCounter);
+    uint8_t *cipher = packet + PREFIX_SIZE;
+    chachaPolyLock(cipher, cipher + plainLength, sendKeyValue, sendCounter,
+                   ad, adLength, cipher, plainLength);
+    sendCounter++;
+    return true;
+}
+
+bool SecureTransport::openInPlace(const uint8_t *ad, size_t adLength,
+                                  uint8_t *packet, size_t packetLength,
+                                  size_t &plainLength)
+{
+    plainLength = 0;
+    if (!initialized || packet == NULL || packetLength < OVERHEAD ||
+        get32(packet) != receiveIndex)
+        return false;
+    uint64_t counter = get64le(packet + 4);
+    if (!replay.canAccept(counter))
+        return false;
+    plainLength = packetLength - OVERHEAD;
+    const uint8_t *cipher = packet + PREFIX_SIZE;
+    const uint8_t *tag = cipher + plainLength;
+    // Destination precedes source by PREFIX_SIZE bytes. Monocypher processes
+    // ChaCha20 forwards, so this overlap never overwrites unread ciphertext.
+    if (!chachaPolyUnlock(plainLength == 0 ? NULL : packet, tag,
+                          receiveKeyValue, counter, ad, adLength,
+                          cipher, plainLength))
+    {
+        plainLength = 0;
+        return false;
+    }
     replay.accept(counter);
     return true;
 }

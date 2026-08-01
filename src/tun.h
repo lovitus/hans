@@ -35,6 +35,7 @@ public:
 
     int read(char *buffer);
     int read(char *buffer, uint32_t &sourceIp, uint32_t &destIp);
+    bool hasPendingRead() const;
 
     void write(const char *buffer, int length);
 

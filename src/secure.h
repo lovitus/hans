@@ -113,6 +113,15 @@ public:
     bool open(const uint8_t *additionalData, size_t additionalLength,
               const uint8_t *packet, size_t packetLength,
               std::vector<uint8_t> &plain);
+    // The plaintext for sealPrepared starts at packet + PREFIX_SIZE.  Both
+    // methods keep the wire format identical to seal/open while avoiding a
+    // per-packet allocation and copy in the tunnel data path.
+    bool sealPrepared(const uint8_t *additionalData, size_t additionalLength,
+                      uint8_t *packet, size_t plainLength,
+                      size_t packetCapacity);
+    bool openInPlace(const uint8_t *additionalData, size_t additionalLength,
+                     uint8_t *packet, size_t packetLength,
+                     size_t &plainLength);
 
 private:
     bool initialized;

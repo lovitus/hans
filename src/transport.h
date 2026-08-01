@@ -12,6 +12,8 @@
 #define TRANSPORT_H
 
 #include <stdint.h>
+#include <stddef.h>
+#include <vector>
 
 class TransportV3
 {
@@ -105,6 +107,30 @@ private:
     bool haveRttSample;
     int growthAcks;
     int idleTicks;
+};
+
+class DirectAckTracker
+{
+public:
+    DirectAckTracker();
+    DirectAckTracker(const DirectAckTracker &other);
+    DirectAckTracker &operator=(const DirectAckTracker &other);
+
+    void clear() { entries.clear(); }
+    void record(uint32_t sequence, int64_t sentMilliseconds);
+    void acknowledge(uint32_t ackSequence, uint32_t ackBits);
+    bool failed(int64_t nowMilliseconds, size_t minimumOutstanding,
+                int timeoutMilliseconds) const;
+    size_t size() const { return entries.size(); }
+    size_t capacity() const { return entries.capacity(); }
+
+private:
+    struct Entry
+    {
+        uint32_t sequence;
+        int64_t sentMilliseconds;
+    };
+    std::vector<Entry> entries;
 };
 
 #endif

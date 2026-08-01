@@ -72,6 +72,62 @@ static void testHandshakeAndTransport()
     assert(!clientTransport.open(ad, sizeof(ad), &packet[0], packet.size(), opened));
 }
 
+static void testPreparedTransportMatchesWireFormat()
+{
+    uint8_t sendKey[32];
+    uint8_t receiveKey[32];
+    for (int i = 0; i < 32; ++i)
+    {
+        sendKey[i] = (uint8_t)(i * 3 + 1);
+        receiveKey[i] = (uint8_t)(0xf0 - i);
+    }
+    const uint8_t ad[] = {'h','n','c','4',7};
+    const uint8_t plain[] = {0, 1, 2, 3, 0xfe, 0xff, 9};
+
+    SecureTransport vectorSender, preparedSender;
+    vectorSender.initialize(0x12345678, 0x87654321, sendKey, receiveKey);
+    preparedSender.initialize(0x12345678, 0x87654321, sendKey, receiveKey);
+    std::vector<uint8_t> expected;
+    assert(vectorSender.seal(ad, sizeof(ad), plain, sizeof(plain), expected));
+
+    uint8_t packet[128] = {0};
+    memcpy(packet + SecureTransport::PREFIX_SIZE, plain, sizeof(plain));
+    assert(preparedSender.sealPrepared(ad, sizeof(ad), packet, sizeof(plain),
+                                       sizeof(packet)));
+    assert(expected.size() == SecureTransport::OVERHEAD + sizeof(plain));
+    assert(memcmp(packet, &expected[0], expected.size()) == 0);
+
+    SecureTransport receiver;
+    receiver.initialize(0x87654321, 0x12345678, receiveKey, sendKey);
+    size_t openedLength = 999;
+    assert(receiver.openInPlace(ad, sizeof(ad), packet, expected.size(),
+                                openedLength));
+    assert(openedLength == sizeof(plain));
+    assert(memcmp(packet, plain, sizeof(plain)) == 0);
+    assert(!receiver.openInPlace(ad, sizeof(ad), packet, expected.size(),
+                                 openedLength));
+    assert(openedLength == 0);
+
+    SecureTransport tooSmall;
+    tooSmall.initialize(1, 2, sendKey, receiveKey);
+    assert(!tooSmall.sealPrepared(ad, sizeof(ad), packet, sizeof(plain),
+                                  SecureTransport::OVERHEAD));
+
+    SecureTransport tamperSender, tamperReceiver;
+    tamperSender.initialize(9, 10, sendKey, receiveKey);
+    tamperReceiver.initialize(10, 9, receiveKey, sendKey);
+    memcpy(packet + SecureTransport::PREFIX_SIZE, plain, sizeof(plain));
+    assert(tamperSender.sealPrepared(ad, sizeof(ad), packet, sizeof(plain),
+                                     sizeof(packet)));
+    packet[SecureTransport::PREFIX_SIZE + 1] ^= 0x40;
+    uint8_t before[sizeof(packet)];
+    memcpy(before, packet, sizeof(packet));
+    assert(!tamperReceiver.openInPlace(ad, sizeof(ad), packet,
+                                       SecureTransport::OVERHEAD + sizeof(plain),
+                                       openedLength));
+    assert(memcmp(before, packet, sizeof(packet)) == 0);
+}
+
 static void testWrongPskAndTamper()
 {
     uint8_t clientSecret[32] = {1};
@@ -123,6 +179,7 @@ static void testIdentityFilePermissions()
 int main()
 {
     testHandshakeAndTransport();
+    testPreparedTransportMatchesWireFormat();
     testWrongPskAndTamper();
     testIdentityFilePermissions();
     std::cout << "OK: Noise XXpsk3 handshake, AEAD and replay tests passed\n";

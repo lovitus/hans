@@ -32,6 +32,10 @@
 #include <stdio.h>
 #include <sstream>
 
+#ifdef LINUX
+#include <poll.h>
+#endif
+
 #ifdef WIN32
 #include <w32api/windows.h>
 #endif
@@ -165,4 +169,22 @@ int Tun::read(char *buffer, uint32_t &sourceIp, uint32_t &destIp)
     destIp = ntohl(header->ip_dst.s_addr);
 
     return length;
+}
+
+bool Tun::hasPendingRead() const
+{
+#ifdef LINUX
+    if (!enabled || fd < 0)
+        return false;
+    struct pollfd descriptor;
+    descriptor.fd = fd;
+    descriptor.events = POLLIN;
+    descriptor.revents = 0;
+    int result;
+    do result = poll(&descriptor, 1, 0);
+    while (result < 0 && errno == EINTR);
+    return result > 0 && (descriptor.revents & POLLIN) != 0;
+#else
+    return false;
+#endif
 }

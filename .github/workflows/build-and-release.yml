@@ -258,6 +258,13 @@ jobs:
                 -c 10.66.77.1 -p 55202 -t 3 --connect-timeout 5000 | tee /tmp/iperf-reverse-client.log
               wait "$iperf_pid"
               grep -q "receiver" /tmp/iperf-reverse-client.log
+              # Both directions must exercise the real Linux batch syscalls;
+              # this guards against compiling the fallback while silently
+              # losing the intended low-risk fast path.
+              grep -q "sendmmsg ICMP send batching active" /tmp/hans-server.log
+              grep -q "recvmmsg ICMP receive batching active" /tmp/hans-server.log
+              grep -q "sendmmsg ICMP send batching active" /tmp/hans-client.log
+              grep -q "recvmmsg ICMP receive batching active" /tmp/hans-client.log
 
               # Drop both underlay directions. The first mode-change request
               # is therefore lost as well: after connectivity returns the

@@ -516,6 +516,15 @@ Echo::Echo(int maxPayloadSize, bool preferUnprivileged)
     ipv6DatagramSocket = false;
     fd = -1;
     ipv6Fd = -1;
+#ifdef LINUX
+    pendingSendCount = 0;
+    activeReceiveBuffer = 0;
+    batchActive = false;
+    sendmmsgAvailable = true;
+    recvmmsgAvailable = true;
+    sendBatchObserved = false;
+    receiveBatchObserved = false;
+#endif
 #ifdef WIN32
     windowsBackend = NULL;
     if (preferUnprivileged)
@@ -559,8 +568,17 @@ Echo::Echo(int maxPayloadSize, bool preferUnprivileged)
         ipv6Fd = socket(AF_INET6, SOCK_RAW, IPPROTO_ICMPV6);
 
     bufferSize = maxPayloadSize + headerSize();
+#ifdef LINUX
+    for (int i = 0; i < MAX_BATCH_PACKETS; ++i)
+    {
+        sendBuffers[i].resize(bufferSize);
+        receiveBuffers[i].resize(bufferSize);
+    }
+    syslog(LOG_INFO, "using single-threaded Linux batched ICMP I/O");
+#else
     sendBuffer.resize(bufferSize);
     receiveBuffer.resize(bufferSize);
+#endif
 }
 
 Echo::~Echo()
@@ -602,8 +620,16 @@ void Echo::send(int payloadLength, const Address &address, bool reply,
     int sendFd = address.family() == AF_INET6 ? ipv6Fd : fd;
     if (sendFd < 0)
         throw Exception("the operating system did not provide an ICMPv6 socket");
-    EchoHeader *header = (EchoHeader *)(sendBuffer.data() +
-                                       NETWORK_HEADER_RESERVE);
+#ifdef LINUX
+    if (pendingSendCount >= MAX_BATCH_PACKETS)
+        flushLinuxBatch();
+    int bufferIndex = pendingSendCount;
+    char *rawBuffer = &sendBuffers[bufferIndex][0];
+#else
+    int bufferIndex = 0;
+    char *rawBuffer = &sendBuffer[0];
+#endif
+    EchoHeader *header = (EchoHeader *)(rawBuffer + NETWORK_HEADER_RESERVE);
     header->type = address.family() == AF_INET6 ?
                    (reply ? 129 : 128) : (reply ? 0 : 8);
     header->code = 0;
@@ -611,14 +637,23 @@ void Echo::send(int payloadLength, const Address &address, bool reply,
     header->seq = htons(seq);
     header->chksum = 0;
     if (address.family() == AF_INET)
-        header->chksum = icmpChecksum(sendBuffer.data() + NETWORK_HEADER_RESERVE,
+        header->chksum = icmpChecksum(rawBuffer + NETWORK_HEADER_RESERVE,
                                      payloadLength + sizeof(EchoHeader));
 
-    int result = sendto(sendFd, sendBuffer.data() + NETWORK_HEADER_RESERVE,
-                        payloadLength + sizeof(EchoHeader), 0,
-                        address.sockaddrValue(), address.length());
-    if (result == -1)
-        syslog(LOG_ERR, "error sending icmp packet: %s", strerror(errno));
+    int wireLength = payloadLength + sizeof(EchoHeader);
+#ifdef LINUX
+    if (batchActive)
+    {
+        pendingSends[bufferIndex].address = address;
+        pendingSends[bufferIndex].fd = sendFd;
+        pendingSends[bufferIndex].wireLength = wireLength;
+        ++pendingSendCount;
+        if (pendingSendCount == MAX_BATCH_PACKETS)
+            flushLinuxBatch();
+        return;
+    }
+#endif
+    sendOne(sendFd, bufferIndex, wireLength, address);
 }
 
 int Echo::receive(int readyFd, Address &address, bool &reply,
@@ -640,7 +675,12 @@ int Echo::receive(int readyFd, Address &address, bool &reply,
     struct sockaddr_storage source;
     socklen_t sourceAddressLength = sizeof(source);
 
-    char *target = receiveBuffer.data();
+#ifdef LINUX
+    activeReceiveBuffer = 0;
+    char *target = &receiveBuffers[0][0];
+#else
+    char *target = &receiveBuffer[0];
+#endif
     int dataLength = recvfrom(readyFd, target, bufferSize, 0,
                               (struct sockaddr *)&source,
                               &sourceAddressLength);
@@ -650,7 +690,32 @@ int Echo::receive(int readyFd, Address &address, bool &reply,
         return -1;
     }
 
-    address = Address((const struct sockaddr *)&source, sourceAddressLength);
+    ReceivedPacket packet;
+    int parsed = parseReceivedPacket(0, dataLength,
+                                     (const struct sockaddr *)&source,
+                                     sourceAddressLength, packet);
+    if (parsed < 0)
+        return -1;
+    address = packet.address;
+    reply = packet.reply;
+    id = packet.id;
+    seq = packet.seq;
+    return parsed;
+}
+
+int Echo::parseReceivedPacket(int bufferIndex, int dataLength,
+                              const struct sockaddr *source,
+                              socklen_t sourceAddressLength,
+                              ReceivedPacket &packet)
+{
+#ifdef LINUX
+    char *target = &receiveBuffers[bufferIndex][0];
+#else
+    (void)bufferIndex;
+    char *target = &receiveBuffer[0];
+#endif
+
+    packet.address = Address(source, sourceAddressLength);
     int icmpOffset = 0;
     if (dataLength > 0 && ((unsigned char)target[0] >> 4) == 4)
     {
@@ -664,20 +729,209 @@ int Echo::receive(int readyFd, Address &address, bool &reply,
     int icmpLength = dataLength - icmpOffset;
     memmove(target + NETWORK_HEADER_RESERVE, target + icmpOffset, icmpLength);
 
-    EchoHeader *header = (EchoHeader *)(receiveBuffer.data() +
-                                       NETWORK_HEADER_RESERVE);
-    bool ipv6 = address.family() == AF_INET6;
+    EchoHeader *header = (EchoHeader *)(target + NETWORK_HEADER_RESERVE);
+    bool ipv6 = packet.address.family() == AF_INET6;
     if ((!ipv6 && header->type != 0 && header->type != 8) ||
         (ipv6 && header->type != 128 && header->type != 129) ||
         header->code != 0)
         return -1;
 
-    reply = ipv6 ? header->type == 129 : header->type == 0;
-    id = ntohs(header->id);
-    seq = ntohs(header->seq);
+    packet.reply = ipv6 ? header->type == 129 : header->type == 0;
+    packet.id = ntohs(header->id);
+    packet.seq = ntohs(header->seq);
+    packet.length = icmpLength - sizeof(EchoHeader);
+    packet.bufferIndex = bufferIndex;
 
-    return icmpLength - sizeof(EchoHeader);
+    return packet.length;
 }
+
+int Echo::receiveMany(int readyFd, ReceivedPacket *packets, int maximum)
+{
+    if (packets == NULL || maximum <= 0)
+        return 0;
+    if (maximum > MAX_BATCH_PACKETS)
+        maximum = MAX_BATCH_PACKETS;
+#ifdef LINUX
+    if (recvmmsgAvailable)
+    {
+        struct mmsghdr messages[MAX_BATCH_PACKETS];
+        struct iovec vectors[MAX_BATCH_PACKETS];
+        struct sockaddr_storage sources[MAX_BATCH_PACKETS];
+        memset(messages, 0, sizeof(messages));
+        memset(vectors, 0, sizeof(vectors));
+        memset(sources, 0, sizeof(sources));
+        for (int i = 0; i < maximum; ++i)
+        {
+            vectors[i].iov_base = &receiveBuffers[i][0];
+            vectors[i].iov_len = bufferSize;
+            messages[i].msg_hdr.msg_iov = &vectors[i];
+            messages[i].msg_hdr.msg_iovlen = 1;
+            messages[i].msg_hdr.msg_name = &sources[i];
+            messages[i].msg_hdr.msg_namelen = sizeof(sources[i]);
+        }
+        int count;
+        do count = recvmmsg(readyFd, messages, maximum, MSG_DONTWAIT, NULL);
+        while (count < 0 && errno == EINTR);
+        if (count >= 0)
+        {
+            if (count > 1 && !receiveBatchObserved)
+            {
+                receiveBatchObserved = true;
+                syslog(LOG_INFO, "recvmmsg ICMP receive batching active");
+            }
+            int validCount = 0;
+            for (int i = 0; i < count; ++i)
+            {
+                ReceivedPacket packet;
+                if (parseReceivedPacket(
+                        i, messages[i].msg_len,
+                        (const struct sockaddr *)&sources[i],
+                        messages[i].msg_hdr.msg_namelen, packet) >= 0)
+                    packets[validCount++] = packet;
+            }
+            return validCount;
+        }
+        if (errno == EAGAIN || errno == EWOULDBLOCK)
+            return 0;
+        if (errno == ENOSYS)
+        {
+            recvmmsgAvailable = false;
+            syslog(LOG_WARNING, "recvmmsg unavailable; using receive fallback");
+        }
+        else
+        {
+            syslog(LOG_ERR, "error receiving ICMP packet batch: %s",
+                   strerror(errno));
+            return 0;
+        }
+    }
+#endif
+    Address address;
+    bool reply;
+    uint16_t id, seq;
+    int length = receive(readyFd, address, reply, id, seq);
+    if (length < 0)
+        return 0;
+    packets[0].address = address;
+    packets[0].reply = reply;
+    packets[0].id = id;
+    packets[0].seq = seq;
+    packets[0].length = length;
+    packets[0].bufferIndex = 0;
+    return 1;
+}
+
+void Echo::selectReceivedPacket(int bufferIndex)
+{
+#ifdef LINUX
+    if (bufferIndex >= 0 && bufferIndex < MAX_BATCH_PACKETS)
+        activeReceiveBuffer = bufferIndex;
+#else
+    (void)bufferIndex;
+#endif
+}
+
+void Echo::beginBatch()
+{
+#ifdef LINUX
+    batchActive = true;
+#endif
+}
+
+void Echo::endBatch()
+{
+#ifdef LINUX
+    flushLinuxBatch();
+    batchActive = false;
+#endif
+}
+
+void Echo::sendOne(int sendFd, int bufferIndex, int wireLength,
+                   const Address &address)
+{
+#ifdef LINUX
+    char *wire = &sendBuffers[bufferIndex][NETWORK_HEADER_RESERVE];
+#else
+    (void)bufferIndex;
+    char *wire = &sendBuffer[NETWORK_HEADER_RESERVE];
+#endif
+    int result;
+    do result = sendto(sendFd, wire, wireLength, 0,
+                       address.sockaddrValue(), address.length());
+    while (result < 0 && errno == EINTR);
+    if (result == -1)
+        syslog(LOG_ERR, "error sending icmp packet: %s", strerror(errno));
+}
+
+#ifdef LINUX
+void Echo::flushLinuxBatch()
+{
+    int start = 0;
+    while (start < pendingSendCount)
+    {
+        int end = start + 1;
+        while (end < pendingSendCount &&
+               pendingSends[end].fd == pendingSends[start].fd)
+            ++end;
+
+        int sent = 0;
+        if (sendmmsgAvailable)
+        {
+            struct mmsghdr messages[MAX_BATCH_PACKETS];
+            struct iovec vectors[MAX_BATCH_PACKETS];
+            memset(messages, 0, sizeof(messages));
+            memset(vectors, 0, sizeof(vectors));
+            for (int i = start; i < end; ++i)
+            {
+                int local = i - start;
+                vectors[local].iov_base =
+                    &sendBuffers[i][NETWORK_HEADER_RESERVE];
+                vectors[local].iov_len = pendingSends[i].wireLength;
+                messages[local].msg_hdr.msg_iov = &vectors[local];
+                messages[local].msg_hdr.msg_iovlen = 1;
+                messages[local].msg_hdr.msg_name =
+                    const_cast<struct sockaddr *>(
+                        pendingSends[i].address.sockaddrValue());
+                messages[local].msg_hdr.msg_namelen =
+                    pendingSends[i].address.length();
+            }
+            while (sent < end - start)
+            {
+                int result = sendmmsg(pendingSends[start].fd,
+                                      messages + sent,
+                                      end - start - sent, 0);
+                if (result > 0)
+                {
+                    if (result > 1 && !sendBatchObserved)
+                    {
+                        sendBatchObserved = true;
+                        syslog(LOG_INFO, "sendmmsg ICMP send batching active");
+                    }
+                    sent += result;
+                    continue;
+                }
+                if (result < 0 && errno == EINTR)
+                    continue;
+                if (result < 0 && errno == ENOSYS)
+                {
+                    sendmmsgAvailable = false;
+                    syslog(LOG_WARNING,
+                           "sendmmsg unavailable; using send fallback");
+                }
+                else if (result < 0)
+                    syslog(LOG_ERR, "error sending ICMP packet batch: %s",
+                           strerror(errno));
+                break;
+            }
+        }
+        for (int i = start + sent; i < end; ++i)
+            sendOne(pendingSends[i].fd, i, pendingSends[i].wireLength,
+                    pendingSends[i].address);
+        start = end;
+    }
+    pendingSendCount = 0;
+}
+#endif
 
 uint16_t Echo::icmpChecksum(const char *data, int length)
 {
@@ -696,10 +950,22 @@ uint16_t Echo::icmpChecksum(const char *data, int length)
 
 char *Echo::sendPayloadBuffer()
 {
-    return sendBuffer.data() + NETWORK_HEADER_RESERVE + sizeof(EchoHeader);
+#ifdef LINUX
+    if (pendingSendCount >= MAX_BATCH_PACKETS)
+        flushLinuxBatch();
+    return &sendBuffers[pendingSendCount][NETWORK_HEADER_RESERVE +
+                                          sizeof(EchoHeader)];
+#else
+    return &sendBuffer[NETWORK_HEADER_RESERVE + sizeof(EchoHeader)];
+#endif
 }
 
 char *Echo::receivePayloadBuffer()
 {
-    return receiveBuffer.data() + NETWORK_HEADER_RESERVE + sizeof(EchoHeader);
+#ifdef LINUX
+    return &receiveBuffers[activeReceiveBuffer][NETWORK_HEADER_RESERVE +
+                                                sizeof(EchoHeader)];
+#else
+    return &receiveBuffer[NETWORK_HEADER_RESERVE + sizeof(EchoHeader)];
+#endif
 }

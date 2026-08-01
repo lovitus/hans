@@ -50,6 +50,18 @@ public:
     Echo(int maxPayloadSize, bool preferUnprivileged = false);
     ~Echo();
 
+    enum { MAX_BATCH_PACKETS = 16 };
+
+    struct ReceivedPacket
+    {
+        Address address;
+        bool reply;
+        uint16_t id;
+        uint16_t seq;
+        int length;
+        int bufferIndex;
+    };
+
     int getFd() { return fd; }
     int getIpv6Fd() { return ipv6Fd; }
 
@@ -57,6 +69,11 @@ public:
               uint16_t id, uint16_t seq);
     int receive(int readyFd, Address &address, bool &reply,
                 uint16_t &id, uint16_t &seq);
+    int receiveMany(int readyFd, ReceivedPacket *packets, int maximum);
+    void selectReceivedPacket(int bufferIndex);
+
+    void beginBatch();
+    void endBatch();
 
     char *sendPayloadBuffer();
     char *receivePayloadBuffer();
@@ -73,6 +90,15 @@ protected:
     }; // size = 8
 
     uint16_t icmpChecksum(const char *data, int length);
+    int parseReceivedPacket(int bufferIndex, int dataLength,
+                            const struct sockaddr *source,
+                            socklen_t sourceAddressLength,
+                            ReceivedPacket &packet);
+    void sendOne(int sendFd, int bufferIndex, int wireLength,
+                 const Address &address);
+#ifdef LINUX
+    void flushLinuxBatch();
+#endif
 
     int fd;
     int ipv6Fd;
@@ -83,8 +109,27 @@ protected:
     class WindowsBackend;
     WindowsBackend *windowsBackend;
 #endif
+#ifdef LINUX
+    struct PendingSend
+    {
+        Address address;
+        int fd;
+        int wireLength;
+    };
+    std::vector<char> sendBuffers[MAX_BATCH_PACKETS];
+    std::vector<char> receiveBuffers[MAX_BATCH_PACKETS];
+    PendingSend pendingSends[MAX_BATCH_PACKETS];
+    int pendingSendCount;
+    int activeReceiveBuffer;
+    bool batchActive;
+    bool sendmmsgAvailable;
+    bool recvmmsgAvailable;
+    bool sendBatchObserved;
+    bool receiveBatchObserved;
+#else
     std::vector<char> sendBuffer;
     std::vector<char> receiveBuffer;
+#endif
 };
 
 #endif
