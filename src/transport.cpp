@@ -220,10 +220,20 @@ void TransportReorderBuffer::drain(
         size_t index = find(expected);
         if (index == items.size())
             break;
-        Item item = items[index];
-        items.erase(items.begin() + index);
-        if (item.isData)
-            ready.push_back(item.data);
+        bool isData = items[index].isData;
+        if (isData)
+        {
+            ready.push_back(std::vector<char>());
+            ready.back().swap(items[index].data);
+        }
+        size_t last = items.size() - 1;
+        if (index != last)
+        {
+            items[index].sequence = items[last].sequence;
+            items[index].isData = items[last].isData;
+            items[index].data.swap(items[last].data);
+        }
+        items.pop_back();
         expected = nextSequence(expected);
     }
     if (items.empty())
@@ -293,12 +303,12 @@ TransportReorderBuffer::Action TransportReorderBuffer::observe(
         return IGNORE_CURRENT;
     }
 
-    Item item;
+    items.push_back(Item());
+    Item &item = items.back();
     item.sequence = sequence;
     item.isData = isData;
     if (isData && length > 0)
         item.data.assign(data, data + length);
-    items.push_back(item);
     bufferedPackets++;
     if (items.size() > maxDepth)
         maxDepth = items.size();
