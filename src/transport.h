@@ -100,6 +100,9 @@ private:
     int initialTarget;
     int currentTarget;
     int smoothedRttMs;
+    int rttVariationMs;
+    int retransmissionTimeoutMs;
+    bool haveRttSample;
     int growthAcks;
     int idleTicks;
 };

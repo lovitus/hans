@@ -44,6 +44,12 @@ jobs:
       - name: Build
         run: |
           make test
+          if [ "${{ matrix.label }}" = "amd64-ubuntu24.04" ]; then
+            make clean
+            make test GPP='g++ -fsanitize=address,undefined -fno-omit-frame-pointer' \
+              GCC='gcc -fsanitize=address,undefined -fno-omit-frame-pointer'
+            make clean
+          fi
           make LDFLAGS=-static
           if readelf -d hans 2>/dev/null | grep -q NEEDED; then
             echo "hans unexpectedly has dynamic dependencies" >&2
@@ -211,7 +217,7 @@ jobs:
               server_pid=$!
               sleep 1
               ip netns exec hans-client /product/hans \
-                -c 192.0.2.1 -p hans-transport-ci -f -v >/tmp/hans-client.log 2>&1 &
+                -c 192.0.2.1 -p hans-transport-ci -m 1400 -f -v >/tmp/hans-client.log 2>&1 &
               client_pid=$!
 
               connected=0
@@ -231,6 +237,8 @@ jobs:
               # replies and upgrade without a user-specified poll window.
               wait_for_log /tmp/hans-client.log "direct reply mode enabled" 40
               grep -q "transport mode is now direct" /tmp/hans-server.log
+              grep -q "lowered server tunnel MTU" /tmp/hans-server.log
+              grep -q "negotiated tunnel MTU" /tmp/hans-client.log
               ip netns exec hans-client ping -c 5 -W 2 10.66.77.1
 
               # Exercise TCP in both directions while using direct replies.
@@ -291,7 +299,7 @@ jobs:
               kill "$client_pid"
               wait "$client_pid" 2>/dev/null || true
               ip netns exec hans-client /product/hans \
-                -c 192.0.2.1 -p hans-transport-ci -f -v >>/tmp/hans-client.log 2>&1 &
+                -c 192.0.2.1 -p hans-transport-ci -m 1400 -f -v >>/tmp/hans-client.log 2>&1 &
               client_pid=$!
               reconnected=0
               for attempt in $(seq 1 40); do

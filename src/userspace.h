@@ -31,6 +31,7 @@ public:
     ~UserspaceNetwork();
 
     void configure(uint32_t ip, uint32_t gateway);
+    void setMtu(int mtu);
     void ingest(const char *packet, int length);
     int addFileDescriptors(fd_set &readSet, fd_set &writeSet, int maxFd);
     void handleFileDescriptors(fd_set &readSet, fd_set &writeSet);

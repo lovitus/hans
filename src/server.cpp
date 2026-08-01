@@ -50,6 +50,8 @@ namespace
 {
     const int DIRECT_UNACKED_LIMIT = 3;
     const int DIRECT_ACK_TIMEOUT_MS = 3000;
+    const int MAX_PENDING_SECURE_HANDSHAKES = 256;
+    const int MAX_PENDING_SECURE_HANDSHAKES_PER_ADDRESS = 8;
 
     void put32(char *buffer, uint32_t value)
     {
@@ -62,6 +64,19 @@ namespace
         uint32_t value;
         memcpy(&value, buffer, sizeof(value));
         return ntohl(value);
+    }
+
+    uint16_t get16(const char *buffer)
+    {
+        uint16_t value;
+        memcpy(&value, buffer, sizeof(value));
+        return ntohs(value);
+    }
+
+    void put16(char *buffer, uint16_t value)
+    {
+        value = htons(value);
+        memcpy(buffer, &value, sizeof(value));
     }
 }
 
@@ -254,11 +269,36 @@ void Server::handleV4HandshakeInit(const TunnelHeader &, int dataLength,
                                    uint32_t realIp, uint16_t echoId,
                                    uint16_t echoSeq)
 {
-    if (dataLength != 36)
+    if (dataLength != 36 && dataLength != 37)
         return;
     uint32_t peerIndex = get32(echoReceivePayloadBuffer());
     if (peerIndex == 0)
         return;
+    const int noiseOffset = dataLength == 37 ? 5 : 4;
+    if (dataLength == 37 &&
+        ((uint8_t)echoReceivePayloadBuffer()[4] &
+         TransportV3::CAP_WINDOWS_ICMP_HELPER) != 0)
+        kernelEchoGuard.suppress();
+
+    int pending = 0;
+    int pendingForAddress = 0;
+    for (ClientList::iterator it = clientList.begin(); it != clientList.end(); ++it)
+    {
+        if (it->protocolVersion == 4 &&
+            it->state == ClientData::STATE_CHALLENGE_SENT)
+        {
+            ++pending;
+            if (it->realIp == realIp)
+                ++pendingForAddress;
+        }
+    }
+    if (pending >= MAX_PENDING_SECURE_HANDSHAKES ||
+        pendingForAddress >= MAX_PENDING_SECURE_HANDSHAKES_PER_ADDRESS)
+    {
+        syslog(LOG_WARNING, "secure handshake limit reached for %s",
+               Utility::formatIp(realIp).c_str());
+        return;
+    }
 
     ClientData client;
     client.realIp = realIp;
@@ -282,7 +322,7 @@ void Server::handleV4HandshakeInit(const TunnelHeader &, int dataLength,
     client.maxPolls = 1;
     client.state = ClientData::STATE_CHALLENGE_SENT;
     if (!client.secureHandshake->readMessage1(
-            (const uint8_t *)echoReceivePayloadBuffer() + 4, 32))
+            (const uint8_t *)echoReceivePayloadBuffer() + noiseOffset, 32))
     {
         delete client.secureHandshake;
         return;
@@ -320,7 +360,8 @@ void Server::handleV4HandshakeFinish(const TunnelHeader &, int dataLength,
     if (!client->secureHandshake->readMessage3(
             (const uint8_t *)echoReceivePayloadBuffer() + 8,
             dataLength - 8, decoded) ||
-        decoded.size() != sizeof(ClientConnectDataV3))
+        (decoded.size() != sizeof(ClientConnectDataV3) &&
+         decoded.size() != sizeof(ClientConnectDataV3) + 2))
     {
         syslog(LOG_WARNING, "secure authentication failed for %s",
                Utility::formatIp(realIp).c_str());
@@ -329,6 +370,15 @@ void Server::handleV4HandshakeFinish(const TunnelHeader &, int dataLength,
     }
     ClientConnectDataV3 connectData;
     memcpy(&connectData, &decoded[0], sizeof(connectData));
+    uint16_t clientMtu = decoded.size() > sizeof(connectData) ?
+        get16((const char *)&decoded[sizeof(connectData)]) : (uint16_t)tunnelMtu;
+    if (clientMtu >= 68 && clientMtu < tunnelMtu)
+    {
+        tunnelMtu = clientMtu;
+        tun.setMtu(tunnelMtu);
+        syslog(LOG_INFO, "lowered server tunnel MTU to %d for path compatibility",
+               tunnelMtu);
+    }
     string receivedId(connectData.v2.deviceId, DEVICE_ID_HEX_SIZE);
     if (!Utility::isDeviceId(receivedId))
     {
@@ -379,7 +429,7 @@ void Server::handleV4HandshakeFinish(const TunnelHeader &, int dataLength,
     put32(accept + 4, client->sessionId);
     accept[8] = (char)client->capabilities;
     accept[9] = (char)client->transportMode;
-    accept[10] = accept[11] = 0;
+    put16(accept + 10, (uint16_t)tunnelMtu);
     sendV4RawToClient(client, TunnelHeader::TYPE_CONNECTION_ACCEPT,
                       accept, sizeof(accept), echoId, echoSeq);
     client->state = ClientData::STATE_ESTABLISHED;

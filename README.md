@@ -20,6 +20,7 @@ deployment, compatibility, and peer-management features:
 | Lease retention | Offline leases are retained while unused addresses remain. When the pool is full, only the least-recently-seen offline lease is reclaimed; active peers are never evicted. |
 | Peer inspection | `hans --list-peers` shows device ID, tunnel IP, real IP, online/offline state, and last-seen time; `--json` provides stable machine-readable output. `hans --show-identity` displays the v4 public fingerprint. |
 | Adaptive transport | Protocol v3 starts with conservative echo-request credits, measures reply RTT and server backlog, and adjusts the credit count instead of requiring a guessed `-w` window. |
+| Adaptive timing and MTU | Retransmission timeout follows RFC 6298-style smoothed RTT/variance with bounded exponential backoff. v4 peers negotiate the smaller configured inner MTU and lower the server interface conservatively, so differently configured peers do not silently overrun one another. |
 | Direct-reply upgrade and fallback | A client probes whether the path safely passes multiple replies for one echo request. A successful path upgrades to direct replies; sequence/ACK tracking and heartbeats automatically return it to adaptive credits if that path stops working, then probe it again after a quiet interval. |
 | Adapter-free userspace client | `--feature userspace` replaces TUN/TAP with a statically embedded lwIP stack. It exposes SOCKS5 TCP/UDP access and selected inbound ports while preserving the client's sticky VPN identity and tunnel IP. The normal kernel-interface path is unchanged unless this feature is explicitly selected. |
 | Backward-compatible protocol | New servers still accept v1/v2/v3 clients. New clients try encrypted v4 first, then fall back for older servers unless `--require-v4` is set. `--server-fingerprint` pins the expected server key and prevents impersonation by another member of the same PSK group. |
@@ -29,7 +30,7 @@ deployment, compatibility, and peer-management features:
 | Adapter fallback | Windows prefers an installed TAP-Windows adapter and automatically falls back to bundled Wintun. Linux prefers TUN and falls back to a veth pair plus `AF_PACKET` when TUN is unavailable. Auto-created interfaces use `hans1`, then `hans2`, and so on. |
 | Safe orphan cleanup | Auto-created Linux veth pairs carry a random ownership marker. On startup Hans removes a pair only when both endpoints and markers match exactly and no live process still owns it; ambiguous interfaces are always retained. |
 | Runtime packaging | Windows compiler and C++ runtimes are linked into `hans.exe`; the package includes the unavoidable `cygwin1.dll` and the signed official `wintun.dll`, allowing use without a separate Cygwin installation. |
-| Automated validation | Every build runs Noise handshake/AEAD/replay and complete v4 framing tests, transport codec, sequence/ACK, adaptive-window, userspace, identity, and lease tests. The stripped package is then tested from an isolated product directory after its build environment is removed. Privileged Linux CI verifies direct mode, bidirectional TCP, forced-path fallback/recovery, and re-upgrade. Another test runs the stripped client unprivileged without TUN and exercises authenticated SOCKS5 TCP/UDP plus both port-mapping forms. |
+| Automated validation | Every build runs Noise handshake/AEAD/replay and complete v4 framing tests, deterministic parser fuzzing, transport codec, sequence/ACK, adaptive RTO/window, userspace, identity, and lease tests. The main Linux job repeats them under ASan/UBSan. The stripped package is then tested from an isolated product directory after its build environment is removed. Privileged Linux CI verifies negotiated MTU, direct mode, bidirectional TCP, forced-path fallback/recovery, and re-upgrade. Another test runs two same-NAT stripped clients unprivileged without TUN and exercises authenticated SOCKS5 TCP/UDP plus both port-mapping forms. |
 | Continuous releases | Successful builds are collected and published automatically on the [Releases page](../../releases). |
 
 ## How it works
@@ -418,7 +419,7 @@ sudo ./hans -s 10.0.0.0 -p secret -r
 
 | Flag | Purpose |
 | --- | --- |
-| `-m mtu` | Reference MTU of the path between client and server (default `1500`). Must match on both sides. Lower it if you see fragmentation/connectivity issues on constrained links. |
+| `-m mtu` | Reference MTU of the path (default `1500`). v4 negotiates the smaller configured inner MTU; lower it for constrained links. Legacy versions still require matching values. |
 | `-w auto` | Default. Negotiate v3 adaptive credits, probe direct replies, automatically downgrade on failure, and retry the direct path later. Usually no tuning is needed. |
 | `-w polls` | Force the old fixed credit count for diagnostics or a known path. `0` forces direct replies and intentionally disables automatic fallback; prefer `auto` for normal use. |
 | `-i` | Change the ICMP echo **id** on every request (client only). Helps with routers/firewalls that get confused by a static id. |

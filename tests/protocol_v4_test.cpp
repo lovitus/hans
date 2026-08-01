@@ -42,11 +42,12 @@ int main()
     const uint32_t serverIndex = 0xa1b2c3d4;
     std::vector<uint8_t> noise;
     assert(client.writeMessage1(noise));
-    std::vector<uint8_t> init(4 + noise.size());
+    std::vector<uint8_t> init(5 + noise.size());
     put32(&init[0], clientIndex);
-    memcpy(&init[4], &noise[0], noise.size());
+    init[4] = 8; // Windows ICMP helper handshake hint
+    memcpy(&init[5], &noise[0], noise.size());
     assert(get32(&init[0]) == clientIndex);
-    assert(server.readMessage1(&init[4], init.size() - 4));
+    assert(server.readMessage1(&init[5], init.size() - 5));
 
     assert(server.writeMessage2(noise));
     std::vector<uint8_t> response(8 + noise.size());

@@ -236,6 +236,13 @@ public:
         syslog(LOG_INFO, "userspace network ready at %s", Utility::formatIp(ip).c_str());
     }
 
+    void setMtu(int newMtu)
+    {
+        mtu = newMtu;
+        if (configured)
+            interface.mtu = (u16_t)newMtu;
+    }
+
     void ingest(const char *packet, int length)
     {
         if (!configured || length <= 0)
@@ -1154,6 +1161,11 @@ UserspaceNetwork::~UserspaceNetwork()
 void UserspaceNetwork::configure(uint32_t ip, uint32_t gateway)
 {
     impl->configure(ip, gateway);
+}
+
+void UserspaceNetwork::setMtu(int mtu)
+{
+    impl->setMtu(mtu);
 }
 
 void UserspaceNetwork::ingest(const char *packet, int length)

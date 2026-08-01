@@ -56,6 +56,11 @@ namespace
         value = htonl(value);
         memcpy(buffer, &value, sizeof(value));
     }
+    void put16(char *buffer, uint16_t value)
+    {
+        value = htons(value);
+        memcpy(buffer, &value, sizeof(value));
+    }
 }
 
 Client::Client(int tunnelMtu, const string *deviceName, uint32_t serverIp,
@@ -147,9 +152,15 @@ void Client::sendConnectionRequest()
         if (!secureHandshake->writeMessage1(message))
             throw Exception("creating secure handshake initiation");
         put32(echoSendPayloadBuffer(), localReceiverIndex);
-        memcpy(echoSendPayloadBuffer() + 4, &message[0], message.size());
+        uint8_t handshakeHints = 0;
+#ifdef WIN32
+        if (userspaceNetwork != NULL)
+            handshakeHints |= TransportV3::CAP_WINDOWS_ICMP_HELPER;
+#endif
+        echoSendPayloadBuffer()[4] = (char)handshakeHints;
+        memcpy(echoSendPayloadBuffer() + 5, &message[0], message.size());
         sendEchoToServer(TunnelHeader::TYPE_HANDSHAKE_INIT,
-                         4 + (int)message.size());
+                         5 + (int)message.size());
     }
     else if (protocolVersion == 1)
     {
@@ -213,10 +224,12 @@ void Client::sendV4HandshakeFinish()
 #endif
     connectData.minimumPolls = 2;
     connectData.maximumPolls = 128;
+    uint8_t metadata[sizeof(connectData) + 2];
+    memcpy(metadata, &connectData, sizeof(connectData));
+    put16((char *)metadata + sizeof(connectData), (uint16_t)tunnelMtu);
     std::vector<uint8_t> message;
     if (secureHandshake == NULL ||
-        !secureHandshake->writeMessage3((const uint8_t *)&connectData,
-                                        sizeof(connectData), message))
+        !secureHandshake->writeMessage3(metadata, sizeof(metadata), message))
         throw Exception("creating secure handshake finish");
     secureTransport.initialize(peerReceiverIndex, localReceiverIndex,
                                secureHandshake->sendKey(),
@@ -356,6 +369,23 @@ bool Client::handleEchoData(const TunnelHeader &header, int dataLength,
                         (transportMode != TransportV3::MODE_CREDIT &&
                          transportMode != TransportV3::MODE_DIRECT))
                         throw Exception("invalid transport negotiation received");
+                    if (protocolVersion == 4)
+                    {
+                        uint16_t negotiatedMtu;
+                        memcpy(&negotiatedMtu,
+                               echoReceivePayloadBuffer() + 10,
+                               sizeof(negotiatedMtu));
+                        negotiatedMtu = ntohs(negotiatedMtu);
+                        if (negotiatedMtu >= 68 && negotiatedMtu < tunnelMtu)
+                        {
+                            tunnelMtu = negotiatedMtu;
+                            tun.setMtu(tunnelMtu);
+                            if (userspaceNetwork != NULL)
+                                userspaceNetwork->setMtu(tunnelMtu);
+                            syslog(LOG_INFO, "negotiated tunnel MTU %d",
+                                   tunnelMtu);
+                        }
+                    }
                 }
                 if (ip != clientIp)
                 {

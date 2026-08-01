@@ -77,10 +77,12 @@ static void testAdaptiveCredit()
 {
     AdaptiveCredit credit(2, 32, 4);
     assert(credit.target() == 4);
-    assert(credit.timeoutMs() == 800);
+    assert(credit.timeoutMs() == 1000);
 
     credit.onReply(8, 100);
     assert(credit.target() == 6);
+    assert(credit.rttMs() == 100);
+    assert(credit.timeoutMs() == 300);
 
     for (int i = 0; i < 3; ++i)
         credit.onReply(8, 100);
@@ -91,11 +93,14 @@ static void testAdaptiveCredit()
     assert(credit.target() > 10 && credit.target() <= 32);
 
     int beforeTimeout = credit.target();
+    int beforeRto = credit.timeoutMs();
     credit.onTimeout();
     assert(credit.target() == beforeTimeout / 2);
+    assert(credit.timeoutMs() == beforeRto * 2);
     while (credit.target() > 2)
         credit.onTimeout();
     assert(credit.target() == 2);
+    assert(credit.timeoutMs() <= 10000);
 
     credit.reset();
     for (int i = 0; i < 8; ++i)

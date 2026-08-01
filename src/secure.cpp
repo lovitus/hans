@@ -204,15 +204,22 @@ SecureIdentity::~SecureIdentity()
 
 void SecureIdentity::loadOrCreate(const std::string &path)
 {
-    int fd = open(path.c_str(), O_RDONLY);
+    int readFlags = O_RDONLY;
+#ifdef O_NOFOLLOW
+    readFlags |= O_NOFOLLOW;
+#endif
+    int fd = open(path.c_str(), readFlags);
     if (fd >= 0)
     {
-        bool ok = readExact(fd, secret, sizeof(secret));
+        struct stat info;
+        bool privateFile = fstat(fd, &info) == 0 && S_ISREG(info.st_mode) &&
+                           (info.st_mode & (S_IRWXG | S_IRWXO)) == 0;
+        bool ok = privateFile && readExact(fd, secret, sizeof(secret));
         uint8_t extra;
         bool exact = ok && read(fd, &extra, 1) == 0;
         close(fd);
         if (!exact)
-            throw Exception("invalid secure identity file");
+            throw Exception("secure identity must be a private 32-byte regular file");
     }
     else
     {
@@ -220,7 +227,11 @@ void SecureIdentity::loadOrCreate(const std::string &path)
             throw Exception("could not open secure identity file", true);
         Utility::ensureParentDirectory(path);
         Utility::secureRandom(secret, sizeof(secret));
-        fd = open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0600);
+        int createFlags = O_WRONLY | O_CREAT | O_EXCL;
+#ifdef O_NOFOLLOW
+        createFlags |= O_NOFOLLOW;
+#endif
+        fd = open(path.c_str(), createFlags, 0600);
         if (fd < 0)
             throw Exception("could not create secure identity file", true);
         size_t offset = 0;

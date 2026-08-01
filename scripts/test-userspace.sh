@@ -16,7 +16,7 @@ client_log="$work/client.log"
 
 cleanup() {
     kill "${client_pid:-}" "${server_pid:-}" "${server_http_pid:-}" \
-         "${client_http_pid:-}" "${udp_pid:-}" 2>/dev/null || true
+         "${client2_pid:-}" "${client_http_pid:-}" "${udp_pid:-}" 2>/dev/null || true
     ip netns delete "$client_ns" 2>/dev/null || true
     ip netns delete "$server_ns" 2>/dev/null || true
 }
@@ -28,14 +28,17 @@ diagnostics() {
         cat "$server_log" >&2 2>/dev/null || true
         echo "userspace client log:" >&2
         cat "$client_log" >&2 2>/dev/null || true
+        echo "second same-NAT userspace client log:" >&2
+        cat "$work/client2.log" >&2 2>/dev/null || true
     fi
     cleanup
     exit "$status"
 }
 trap diagnostics EXIT INT TERM
 
-mkdir -p "$work/client-state" "$work/server-state"
+mkdir -p "$work/client-state" "$work/client2-state" "$work/server-state"
 chmod 777 "$work/client-state"
+chmod 777 "$work/client2-state"
 printf '%s\n' 'userspace-secret' >"$work/socks-password"
 chmod 600 "$work/socks-password"
 chown 65534:65534 "$work/socks-password"
@@ -110,6 +113,24 @@ done
 [ "$connected" -eq 1 ]
 grep -q "using unprivileged ICMP ping socket" "$client_log"
 
+# A second unprivileged userspace process has the same underlay source IP.
+# Protocol v4 must demultiplex it by receiver index and assign an independent
+# authenticated sticky identity instead of replacing the first client.
+ip netns exec "$client_ns" setpriv --reuid 65534 --regid 65534 --clear-groups \
+    env HANS_STATE_DIR="$work/client2-state" "$BINABS" \
+    -c 192.0.2.1 -p hans-userspace-ci -f -v \
+    --feature userspace --socks5 127.0.0.1:18084 \
+    >"$work/client2.log" 2>&1 &
+client2_pid=$!
+attempt=40
+while [ "$attempt" -gt 0 ]; do
+    grep -q "userspace network ready at 10.77.88.101" "$work/client2.log" && break
+    kill -0 "$client2_pid"
+    sleep 0.25
+    attempt=$((attempt - 1))
+done
+grep -q "userspace network ready at 10.77.88.101" "$work/client2.log"
+
 # Userspace mode must not create any kernel tunnel interface in the client.
 [ "$(ip -n "$client_ns" -o link show | wc -l)" -eq 2 ]
 
@@ -118,6 +139,14 @@ ip netns exec "$client_ns" curl --fail --silent --show-error --max-time 20 \
     --proxy-user hans:userspace-secret \
     http://10.77.88.1:18080/$(basename "$BINABS") -o "$work/socks-download"
 cmp "$BINABS" "$work/socks-download"
+ip netns exec "$client_ns" curl --fail --silent --show-error --max-time 20 \
+    --socks5-hostname 127.0.0.1:18084 \
+    http://10.77.88.1:18080/$(basename "$BINABS") -o "$work/socks-download-2"
+cmp "$BINABS" "$work/socks-download-2"
+
+peer_table="$(HANS_STATE_DIR="$work/server-state" ip netns exec "$server_ns" \
+    "$BINABS" --list-peers --json)"
+[ "$(printf '%s' "$peer_table" | grep -o '192.0.2.2' | wc -l)" -eq 2 ]
 
 ip netns exec "$server_ns" curl --fail --silent --show-error --max-time 20 \
     http://10.77.88.100:18081/$(basename "$BINABS") -o "$work/share-download"

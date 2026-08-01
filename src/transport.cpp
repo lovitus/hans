@@ -163,6 +163,9 @@ void AdaptiveCredit::reset()
 {
     currentTarget = initialTarget;
     smoothedRttMs = 200;
+    rttVariationMs = 100;
+    retransmissionTimeoutMs = 1000;
+    haveRttSample = false;
     growthAcks = 0;
     idleTicks = 0;
 }
@@ -170,7 +173,26 @@ void AdaptiveCredit::reset()
 void AdaptiveCredit::onReply(unsigned int queuedPackets, int rttSampleMs)
 {
     if (rttSampleMs > 0 && rttSampleMs < 60000)
-        smoothedRttMs = (smoothedRttMs * 7 + rttSampleMs) / 8;
+    {
+        if (!haveRttSample)
+        {
+            smoothedRttMs = rttSampleMs;
+            rttVariationMs = rttSampleMs / 2;
+            haveRttSample = true;
+        }
+        else
+        {
+            int difference = smoothedRttMs - rttSampleMs;
+            if (difference < 0) difference = -difference;
+            rttVariationMs = (rttVariationMs * 3 + difference) / 4;
+            smoothedRttMs = (smoothedRttMs * 7 + rttSampleMs) / 8;
+        }
+        int margin = rttVariationMs * 4;
+        if (margin < 100) margin = 100;
+        retransmissionTimeoutMs = smoothedRttMs + margin;
+        if (retransmissionTimeoutMs < 250) retransmissionTimeoutMs = 250;
+        if (retransmissionTimeoutMs > 10000) retransmissionTimeoutMs = 10000;
+    }
 
     if (queuedPackets == 0)
     {
@@ -207,6 +229,9 @@ void AdaptiveCredit::onTimeout()
         currentTarget = minTarget;
     growthAcks = 0;
     idleTicks = 0;
+    retransmissionTimeoutMs *= 2;
+    if (retransmissionTimeoutMs > 10000)
+        retransmissionTimeoutMs = 10000;
 }
 
 void AdaptiveCredit::onIdleTick()
@@ -221,10 +246,5 @@ void AdaptiveCredit::onIdleTick()
 
 int AdaptiveCredit::timeoutMs() const
 {
-    int timeout = smoothedRttMs * 4;
-    if (timeout < 750)
-        timeout = 750;
-    if (timeout > 5000)
-        timeout = 5000;
-    return timeout;
+    return retransmissionTimeoutMs;
 }

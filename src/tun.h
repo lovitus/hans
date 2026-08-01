@@ -39,6 +39,7 @@ public:
     void write(const char *buffer, int length);
 
     void setIp(uint32_t ip, uint32_t destIp);
+    void setMtu(int mtu);
 protected:
     std::string device;
 

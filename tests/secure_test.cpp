@@ -5,6 +5,11 @@
 #include <string.h>
 #include <iostream>
 #include <vector>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/stat.h>
+#include <stdio.h>
+#include <time.h>
 
 static void exchange(NoiseHandshake &initiator, NoiseHandshake &responder,
                      const char *payload)
@@ -90,10 +95,36 @@ static void testWrongPskAndTamper()
     assert(!client2.readMessage2(&message[0], message.size()));
 }
 
+static void testIdentityFilePermissions()
+{
+    char path[128];
+    snprintf(path, sizeof(path), "/tmp/hans-secure-test-%ld-%u",
+             (long)getpid(), (unsigned int)time(NULL));
+    int fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0600);
+    assert(fd >= 0);
+    uint8_t key[32] = {7};
+    assert(write(fd, key, sizeof(key)) == (ssize_t)sizeof(key));
+    close(fd);
+    assert(chmod(path, 0644) == 0);
+    bool rejected = false;
+    try
+    {
+        SecureIdentity identity;
+        identity.loadOrCreate(path);
+    }
+    catch (...)
+    {
+        rejected = true;
+    }
+    assert(rejected);
+    unlink(path);
+}
+
 int main()
 {
     testHandshakeAndTransport();
     testWrongPskAndTamper();
+    testIdentityFilePermissions();
     std::cout << "OK: Noise XXpsk3 handshake, AEAD and replay tests passed\n";
     return 0;
 }

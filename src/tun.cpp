@@ -75,8 +75,15 @@ Tun::Tun(const string *device, int mtu, bool enabled)
 
     syslog(LOG_INFO, "opened tunnel device: %s", this->device.data());
 
-    std::stringstream cmdline;
+    setMtu(mtu);
+}
 
+void Tun::setMtu(int newMtu)
+{
+    mtu = newMtu;
+    if (!enabled)
+        return;
+    std::stringstream cmdline;
 #ifdef WIN32
     cmdline << "netsh interface ipv4 set subinterface \"" << this->device
             << "\" mtu=" << mtu;
