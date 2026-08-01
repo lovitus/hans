@@ -310,7 +310,8 @@ namespace
                                   TRUSTEE_IS_GROUP };
         for (int i = 0; i < 3; ++i)
         {
-            access[i].grfAccessPermissions = GENERIC_ALL;
+            access[i].grfAccessPermissions = FILE_GENERIC_READ |
+                                             FILE_GENERIC_WRITE | DELETE;
             access[i].grfAccessMode = SET_ACCESS;
             access[i].grfInheritance = NO_INHERITANCE;
             access[i].Trustee.TrusteeForm = TRUSTEE_IS_SID;
