@@ -174,6 +174,8 @@ protected:
                         uint16_t echoId, uint16_t echoSeq);
     void sendDirectProbeReplies(ClientData *client, uint16_t echoId,
                                 uint16_t echoSeq);
+    void handleClientData(ClientData *sourceClient, const char *packet,
+                          int packetLength);
     bool parseTransportHeader(ClientData *client, int &dataLength,
                               TransportV3::Header &transport);
     bool openV4Packet(ClientData *client, const TunnelHeader &header,

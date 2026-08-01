@@ -327,7 +327,7 @@ jobs:
               set -e
               apt-get update -qq
               DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-                curl iproute2 python3 util-linux
+                curl iproute2 iptables python3 util-linux
               sh /product/test-userspace.sh /product/hans
             '
       - name: Test packaged ICMPv6 outer transport
@@ -680,6 +680,18 @@ jobs:
           if ($id1 -notmatch '^[0-9a-f]{32}$' -or $id1 -ne $id2) {
             throw "Packaged hans.exe failed persistent device ID test: '$id1' / '$id2'"
           }
+
+          # A native Windows launch must remain writable even when Cygwin HOME
+          # is absent or points at its read-only root directory.
+          Remove-Item Env:HANS_STATE_DIR
+          $env:HOME = '/'
+          $defaultId = (& $exe --show-device-id | Out-String).Trim()
+          $defaultStateFile = Join-Path $env:LOCALAPPDATA 'Hans\device-id'
+          if ($defaultId -notmatch '^[0-9a-f]{32}$' -or
+              -not (Test-Path -LiteralPath $defaultStateFile)) {
+            throw "Packaged hans.exe did not use native Windows state directory"
+          }
+          $env:HANS_STATE_DIR = $statePosix
 
           $leaseWindows = Join-Path $state 'leases'
           "$id1 167772260 1785484800 1 3405803796" | Set-Content -Encoding ascii $leaseWindows

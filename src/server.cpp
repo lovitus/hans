@@ -564,8 +564,10 @@ bool Server::handleEchoData(const TunnelHeader &header, int dataLength,
         {
             case TunnelHeader::TYPE_DATA:
                 if (dataLength > 0)
-                    tun.write(echoReceivePayloadBuffer() + TransportV3::HEADER_SIZE,
-                              dataLength);
+                    handleClientData(
+                        client,
+                        echoReceivePayloadBuffer() + TransportV3::HEADER_SIZE,
+                        dataLength);
                 return true;
             case TunnelHeader::TYPE_POLL:
                 return true;
@@ -692,10 +694,13 @@ bool Server::handleEchoData(const TunnelHeader &header, int dataLength,
                 }
 
                 if (client->protocolVersion == 3)
-                    tun.write(echoReceivePayloadBuffer() +
-                              TransportV3::HEADER_SIZE, dataLength);
+                    handleClientData(
+                        client,
+                        echoReceivePayloadBuffer() + TransportV3::HEADER_SIZE,
+                        dataLength);
                 else
-                    sendToTun(dataLength);
+                    handleClientData(client, echoReceivePayloadBuffer(),
+                                     dataLength);
                 return true;
             }
             break;
@@ -810,6 +815,54 @@ Server::ClientData *Server::getClientByDeviceId(const string &deviceId, ClientDa
             return &*it;
     }
     return NULL;
+}
+
+void Server::handleClientData(ClientData *sourceClient, const char *packet,
+                              int packetLength)
+{
+    // Parse only the invariant IPv4 header fields. The tunnel carries IPv4
+    // inner packets, but options and fragmentation are still valid.
+    if (packetLength < 20 || ((const uint8_t *)packet)[0] >> 4 != 4)
+    {
+        syslog(LOG_WARNING, "discarding malformed inner packet from peer %s",
+               sourceClient->deviceId.c_str());
+        return;
+    }
+    int headerLength = (((const uint8_t *)packet)[0] & 15) * 4;
+    if (headerLength < 20 || headerLength > packetLength)
+    {
+        syslog(LOG_WARNING, "discarding malformed inner packet from peer %s",
+               sourceClient->deviceId.c_str());
+        return;
+    }
+
+    uint32_t sourceIp;
+    uint32_t destIp;
+    memcpy(&sourceIp, packet + 12, sizeof(sourceIp));
+    memcpy(&destIp, packet + 16, sizeof(destIp));
+    sourceIp = ntohl(sourceIp);
+    destIp = ntohl(destIp);
+
+    ClientData *target = getClientByTunnelIp(destIp);
+    if (target != NULL && target->state == ClientData::STATE_ESTABLISHED)
+    {
+        // Direct peer forwarding is independent of Linux ip_forward and the
+        // host firewall. Authenticate the inner source before bypassing the
+        // kernel so one peer cannot impersonate another VPN address.
+        if (sourceIp != sourceClient->tunnelIp)
+        {
+            syslog(LOG_WARNING,
+                   "discarding spoofed peer packet from %s claiming %s",
+                   sourceClient->deviceId.c_str(),
+                   Utility::formatIp(sourceIp).c_str());
+            return;
+        }
+        memcpy(echoSendPayloadBuffer(), packet, packetLength);
+        sendEchoToClient(target, TunnelHeader::TYPE_DATA, packetLength);
+        return;
+    }
+
+    tun.write(packet, packetLength);
 }
 
 void Server::handleTunData(int dataLength, uint32_t, uint32_t destIp)

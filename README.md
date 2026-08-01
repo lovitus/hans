@@ -96,6 +96,11 @@ IPv4 **A** record when a hostname has both families, and falls back to an IPv6
 **AAAA** record when no A record is available. The outer carrier is ICMP or
 ICMPv6; the VPN address space transported inside it remains IPv4.
 
+Traffic between connected peers is authenticated and switched directly by the
+Hans server. It does not require `net.ipv4.ip_forward=1` or an iptables
+`FORWARD` rule. Packets addressed to the server itself still enter its TUN
+interface normally.
+
 **Linux: which binary should I use?**
 
 - `hans-linux-<arch>-ubuntuXX.XX` — fully static glibc build produced and

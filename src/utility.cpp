@@ -134,6 +134,22 @@ string Utility::defaultStateFile(const string &name)
     if (overrideDir != NULL && overrideDir[0] != '\0')
         return string(overrideDir) + "/" + name;
 
+#ifdef WIN32
+    // Cygwin HOME can be unset or even "/" when hans.exe is launched from
+    // PowerShell, OpenSSH, Task Scheduler, or a service. Native Windows state
+    // belongs under LocalAppData and must not depend on a Cygwin installation.
+    const char *windowsHome = getenv("LOCALAPPDATA");
+    if (windowsHome == NULL || windowsHome[0] == '\0')
+        windowsHome = getenv("USERPROFILE");
+    if (windowsHome != NULL && windowsHome[0] != '\0')
+    {
+        string stateDir(windowsHome);
+        for (string::iterator it = stateDir.begin(); it != stateDir.end(); ++it)
+            if (*it == '\\') *it = '/';
+        return stateDir + "/Hans/" + name;
+    }
+#endif
+
     if (geteuid() == 0)
         return string("/var/lib/hans/") + name;
 

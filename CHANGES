@@ -9,6 +9,8 @@ Release 1.5 (August 2026)
 * Add complete v4 framing, tamper, wrong-PSK, replay, and package tests
 * Add IPv6 server-name/literal resolution and ICMPv6 as an outer carrier;
   the virtual VPN network remains IPv4
+* Switch authenticated peer traffic inside the server without host iptables,
+  and use LocalAppData for native Windows state
 
 Release 1.4 (July 2026)
 -----------------------

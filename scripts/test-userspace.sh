@@ -120,6 +120,7 @@ ip netns exec "$client_ns" setpriv --reuid 65534 --regid 65534 --clear-groups \
     env HANS_STATE_DIR="$work/client2-state" "$BINABS" \
     -c 192.0.2.1 -p hans-userspace-ci -f -v \
     --feature userspace --socks5 127.0.0.1:18084 \
+    --shareports 18085=127.0.0.1:18081 \
     >"$work/client2.log" 2>&1 &
 client2_pid=$!
 attempt=40
@@ -143,6 +144,15 @@ ip netns exec "$client_ns" curl --fail --silent --show-error --max-time 20 \
     --socks5-hostname 127.0.0.1:18084 \
     http://10.77.88.1:18080/$(basename "$BINABS") -o "$work/socks-download-2"
 cmp "$BINABS" "$work/socks-download-2"
+
+# Peer-to-peer packets are switched inside the server, so a restrictive host
+# FORWARD policy must not prevent one VPN client from reaching another.
+ip netns exec "$server_ns" iptables -P FORWARD DROP
+ip netns exec "$client_ns" curl --fail --silent --show-error --max-time 20 \
+    --socks5-hostname 127.0.0.1:18080 \
+    --proxy-user hans:userspace-secret \
+    http://10.77.88.101:18085/$(basename "$BINABS") -o "$work/peer-share-download"
+cmp "$BINABS" "$work/peer-share-download"
 
 peer_table="$(HANS_STATE_DIR="$work/server-state" ip netns exec "$server_ns" \
     "$BINABS" --list-peers --json)"
