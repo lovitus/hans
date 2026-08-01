@@ -35,6 +35,7 @@ using std::string;
 const Worker::TunnelHeader::Magic Client::magic("hanc");
 const Worker::TunnelHeader::Magic Client::v2Magic("hnc2");
 const Worker::TunnelHeader::Magic Client::v3Magic("hnc3");
+const Worker::TunnelHeader::Magic Client::v4Magic("hnc4");
 
 namespace
 {
@@ -50,6 +51,11 @@ namespace
         memcpy(&value, buffer, sizeof(value));
         return ntohl(value);
     }
+    void put32(char *buffer, uint32_t value)
+    {
+        value = htonl(value);
+        memcpy(buffer, &value, sizeof(value));
+    }
 }
 
 Client::Client(int tunnelMtu, const string *deviceName, uint32_t serverIp,
@@ -57,7 +63,8 @@ Client::Client(int tunnelMtu, const string *deviceName, uint32_t serverIp,
                bool changeEchoId, bool changeEchoSeq, uint32_t desiredIp,
                const string &deviceId, bool userspace,
                const string &socksAddress,
-               const vector<SharePort> &sharePorts)
+               const vector<SharePort> &sharePorts,
+               const string &identityFile)
     : Worker(tunnelMtu, deviceName, false, uid, gid, !userspace, userspace),
       auth(passphrase)
 {
@@ -71,10 +78,17 @@ Client::Client(int tunnelMtu, const string *deviceName, uint32_t serverIp,
     this->changeEchoSeq = changeEchoSeq;
     this->nextEchoSequence = Utility::rand();
     this->deviceId = deviceId;
-    this->protocolVersion = 3;
+    this->protocolVersion = 4;
     this->protocolRequestAttempts = 0;
     this->negotiatedCapabilities = 0;
     this->sessionId = 0;
+    this->localReceiverIndex = 0;
+    this->peerReceiverIndex = 0;
+    this->secureHandshake = NULL;
+    secureIdentity.loadOrCreate(identityFile.empty() ?
+                                Utility::defaultStateFile("identity.key") :
+                                identityFile);
+    NoiseHandshake::derivePsk(passphrase, securePsk);
     this->nextTransportSequence = Utility::random32();
     this->transportMode = TransportV3::MODE_CREDIT;
     this->peerTransportMode = TransportV3::MODE_CREDIT;
@@ -97,6 +111,8 @@ Client::Client(int tunnelMtu, const string *deviceName, uint32_t serverIp,
 
 Client::~Client()
 {
+    delete secureHandshake;
+    memset(securePsk, 0, sizeof(securePsk));
     delete userspaceNetwork;
 }
 
@@ -112,7 +128,23 @@ void Client::sendConnectionRequest()
 
     syslog(LOG_DEBUG, "sending protocol v%d connection request", protocolVersion);
 
-    if (protocolVersion == 1)
+    if (protocolVersion == 4)
+    {
+        delete secureHandshake;
+        secureHandshake = new NoiseHandshake(NoiseHandshake::INITIATOR,
+                                              secureIdentity.secretKey(),
+                                              securePsk);
+        localReceiverIndex = Utility::random32();
+        peerReceiverIndex = 0;
+        std::vector<uint8_t> message;
+        if (!secureHandshake->writeMessage1(message))
+            throw Exception("creating secure handshake initiation");
+        put32(echoSendPayloadBuffer(), localReceiverIndex);
+        memcpy(echoSendPayloadBuffer() + 4, &message[0], message.size());
+        sendEchoToServer(TunnelHeader::TYPE_HANDSHAKE_INIT,
+                         4 + (int)message.size());
+    }
+    else if (protocolVersion == 1)
     {
         Server::ClientConnectData *connectData =
             (Server::ClientConnectData *)echoSendPayloadBuffer();
@@ -159,6 +191,38 @@ void Client::sendConnectionRequest()
     setTimeout(5000);
 }
 
+void Client::sendV4HandshakeFinish()
+{
+    Server::ClientConnectDataV3 connectData;
+    memset(&connectData, 0, sizeof(connectData));
+    connectData.v2.legacy.maxPolls = autoPoll ? adaptiveCredit.target() : maxPolls;
+    connectData.v2.legacy.desiredIp = desiredIp;
+    memcpy(connectData.v2.deviceId, deviceId.data(), DEVICE_ID_HEX_SIZE);
+    connectData.capabilities = autoPoll ? TransportV3::ALL_CAPABILITIES :
+                                         TransportV3::CAP_SEQUENCE_ACK;
+#ifdef WIN32
+    if (userspaceNetwork != NULL)
+        connectData.capabilities |= TransportV3::CAP_WINDOWS_ICMP_HELPER;
+#endif
+    connectData.minimumPolls = 2;
+    connectData.maximumPolls = 128;
+    std::vector<uint8_t> message;
+    if (secureHandshake == NULL ||
+        !secureHandshake->writeMessage3((const uint8_t *)&connectData,
+                                        sizeof(connectData), message))
+        throw Exception("creating secure handshake finish");
+    secureTransport.initialize(peerReceiverIndex, localReceiverIndex,
+                               secureHandshake->sendKey(),
+                               secureHandshake->receiveKey());
+    put32(echoSendPayloadBuffer(), localReceiverIndex);
+    put32(echoSendPayloadBuffer() + 4, peerReceiverIndex);
+    memcpy(echoSendPayloadBuffer() + 8, &message[0], message.size());
+    sendEchoToServer(TunnelHeader::TYPE_HANDSHAKE_FINISH,
+                     8 + (int)message.size());
+    state = STATE_CHALLENGE_RESPONSE_SENT;
+    setTimeout(5000);
+}
+
 void Client::sendChallengeResponse(int dataLength)
 {
     if (dataLength != CHALLENGE_SIZE)
@@ -190,8 +254,31 @@ bool Client::handleEchoData(const TunnelHeader &header, int dataLength,
     if (header.magic != serverMagic())
         return false;
 
+    if (protocolVersion == 4 && state == STATE_CONNECTION_REQUEST_SENT &&
+        header.type == TunnelHeader::TYPE_HANDSHAKE_RESPONSE)
+    {
+        if (dataLength != 104 || get32(echoReceivePayloadBuffer() + 4) !=
+                                 localReceiverIndex)
+            return true;
+        peerReceiverIndex = get32(echoReceivePayloadBuffer());
+        if (peerReceiverIndex == 0 || secureHandshake == NULL ||
+            !secureHandshake->readMessage2(
+                (const uint8_t *)echoReceivePayloadBuffer() + 8, 96))
+            throw Exception("invalid secure handshake response");
+        protocolRequestAttempts = 0;
+        sendV4HandshakeFinish();
+        return true;
+    }
+
+    if (protocolVersion == 4 && secureTransport.ready() &&
+        header.type != TunnelHeader::TYPE_HANDSHAKE_RESPONSE)
+    {
+        if (!openV4Packet(header, dataLength))
+            return true;
+    }
+
     TransportV3::Header transport;
-    if (state == STATE_ESTABLISHED && protocolVersion == 3)
+    if (state == STATE_ESTABLISHED && protocolVersion >= 3)
     {
         if (!parseTransportHeader(dataLength, transport, id, seq))
             return true;
@@ -204,7 +291,7 @@ bool Client::handleEchoData(const TunnelHeader &header, int dataLength,
 
             if (state == STATE_ESTABLISHED)
             {
-                protocolVersion = 3;
+                protocolVersion = 4;
                 protocolRequestAttempts = 0;
             }
             // A server also uses RESET to retire an old session from this
@@ -231,7 +318,7 @@ bool Client::handleEchoData(const TunnelHeader &header, int dataLength,
         case TunnelHeader::TYPE_CONNECTION_ACCEPT:
             if (state == STATE_CHALLENGE_RESPONSE_SENT)
             {
-                int expectedLength = protocolVersion == 3 ? 12 :
+                int expectedLength = protocolVersion >= 3 ? 12 :
                                      (int)sizeof(uint32_t);
                 if (dataLength != expectedLength)
                 {
@@ -244,7 +331,7 @@ bool Client::handleEchoData(const TunnelHeader &header, int dataLength,
                 uint32_t ip;
                 memcpy(&ip, echoReceivePayloadBuffer(), sizeof(ip));
                 ip = ntohl(ip);
-                if (protocolVersion == 3)
+                if (protocolVersion >= 3)
                 {
                     sessionId = get32(echoReceivePayloadBuffer() + 4);
                     negotiatedCapabilities =
@@ -291,7 +378,7 @@ bool Client::handleEchoData(const TunnelHeader &header, int dataLength,
             }
             break;
         case TunnelHeader::TYPE_DIRECT_PROBE_REPLY:
-            if (state == STATE_ESTABLISHED && protocolVersion == 3)
+            if (state == STATE_ESTABLISHED && protocolVersion >= 3)
             {
                 if (directProbePending)
                 {
@@ -309,7 +396,7 @@ bool Client::handleEchoData(const TunnelHeader &header, int dataLength,
             }
             break;
         case TunnelHeader::TYPE_MODE_ACK:
-            if (state == STATE_ESTABLISHED && protocolVersion == 3 &&
+            if (state == STATE_ESTABLISHED && protocolVersion >= 3 &&
                 dataLength == 1)
             {
                 uint8_t acceptedMode =
@@ -329,7 +416,7 @@ bool Client::handleEchoData(const TunnelHeader &header, int dataLength,
             }
             break;
         case TunnelHeader::TYPE_TRANSPORT_PING:
-            if (state == STATE_ESTABLISHED && protocolVersion == 3)
+            if (state == STATE_ESTABLISHED && protocolVersion >= 3)
                 return true;
             break;
         default:
@@ -357,6 +444,8 @@ void Client::sendEchoToServer(Worker::TunnelHeader::Type type, int dataLength)
 
 const Worker::TunnelHeader::Magic &Client::clientMagic() const
 {
+    if (protocolVersion == 4)
+        return v4Magic;
     if (protocolVersion == 3)
         return v3Magic;
     if (protocolVersion == 2)
@@ -366,6 +455,8 @@ const Worker::TunnelHeader::Magic &Client::clientMagic() const
 
 const Worker::TunnelHeader::Magic &Client::serverMagic() const
 {
+    if (protocolVersion == 4)
+        return Server::v4Magic;
     if (protocolVersion == 3)
         return Server::v3Magic;
     if (protocolVersion == 2)
@@ -400,13 +491,42 @@ void Client::sendV3ToServer(Worker::TunnelHeader::Type type, int dataLength,
 
     uint16_t sentId = nextEchoId;
     uint16_t sentSeq = nextEchoSequence;
-    sendEchoToServer(type, dataLength + TransportV3::HEADER_SIZE);
+    int wireLength = dataLength + TransportV3::HEADER_SIZE;
+    if (protocolVersion == 4)
+    {
+        TunnelHeader ad;
+        ad.magic = clientMagic();
+        ad.type = type;
+        std::vector<uint8_t> packet;
+        if (!secureTransport.seal((const uint8_t *)&ad, sizeof(ad),
+                                  (const uint8_t *)payload, wireLength, packet))
+            throw Exception("encrypting tunnel packet");
+        memcpy(payload, &packet[0], packet.size());
+        wireLength = packet.size();
+    }
+    sendEchoToServer(type, wireLength);
     // Adaptive credits need a unique request token so replies can be matched
     // to their send time even when the legacy -q option was not requested.
     if (!changeEchoSeq)
         nextEchoSequence = nextEchoSequence + 38543;
     if (trackPoll)
         outstandingPolls[echoKey(sentId, sentSeq)] = now;
+}
+
+bool Client::openV4Packet(const TunnelHeader &header, int &dataLength)
+{
+    std::vector<uint8_t> plain;
+    if (!secureTransport.open((const uint8_t *)&header, sizeof(header),
+                              (const uint8_t *)echoReceivePayloadBuffer(),
+                              dataLength, plain))
+    {
+        syslog(LOG_WARNING, "discarding unauthenticated protocol v4 packet");
+        return false;
+    }
+    if (!plain.empty())
+        memcpy(echoReceivePayloadBuffer(), &plain[0], plain.size());
+    dataLength = plain.size();
+    return true;
 }
 
 bool Client::parseTransportHeader(int &dataLength,
@@ -452,7 +572,7 @@ bool Client::parseTransportHeader(int &dataLength,
 
 void Client::startPolling()
 {
-    if (protocolVersion == 3)
+    if (protocolVersion >= 3)
     {
         if (autoPoll &&
             (negotiatedCapabilities & TransportV3::CAP_ADAPTIVE_CREDIT))
@@ -489,7 +609,7 @@ void Client::startPolling()
 
 void Client::fillPollWindow()
 {
-    if (state != STATE_ESTABLISHED || protocolVersion != 3 ||
+    if (state != STATE_ESTABLISHED || protocolVersion < 3 ||
         transportMode != TransportV3::MODE_CREDIT)
         return;
 
@@ -598,17 +718,17 @@ void Client::handleDataFromServer(int dataLength)
         return;
     }
 
-    const char *packet = protocolVersion == 3 ?
+    const char *packet = protocolVersion >= 3 ?
         echoReceivePayloadBuffer() + TransportV3::HEADER_SIZE :
         echoReceivePayloadBuffer();
     if (userspaceNetwork != NULL)
         userspaceNetwork->ingest(packet, dataLength);
-    else if (protocolVersion == 3)
+    else if (protocolVersion >= 3)
         tun.write(packet, dataLength);
     else
         sendToTun(dataLength);
 
-    if (protocolVersion == 3)
+    if (protocolVersion >= 3)
     {
         if (autoPoll)
             fillPollWindow();
@@ -625,7 +745,7 @@ void Client::handleTunData(int dataLength, uint32_t, uint32_t)
     if (state != STATE_ESTABLISHED)
         return;
 
-    if (protocolVersion == 3)
+    if (protocolVersion >= 3)
         sendV3ToServer(TunnelHeader::TYPE_DATA, dataLength,
                        TransportV3::FLAG_NONE, false);
     else
@@ -642,7 +762,7 @@ void Client::handleTimeout()
             break;
 
         case STATE_ESTABLISHED:
-            if (protocolVersion == 3)
+            if (protocolVersion >= 3)
             {
                 if (autoPoll)
                     transportTick();

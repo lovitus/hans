@@ -29,6 +29,7 @@ public:
     static std::string formatIp(uint32_t ip);
     static int rand();
     static uint32_t random32();
+    static void secureRandom(void *data, size_t length);
     static bool isDeviceId(const std::string &id);
     static std::string normalizeDeviceId(const std::string &id);
     static std::string defaultStateFile(const std::string &name);

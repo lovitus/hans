@@ -24,6 +24,7 @@
 #include "auth.h"
 #include "transport.h"
 #include "userspace.h"
+#include "secure.h"
 
 #include <map>
 #include <vector>
@@ -37,7 +38,8 @@ public:
            bool changeEchoId, bool changeEchoSeq, uint32_t desiredIp,
            const std::string &deviceId, bool userspace = false,
            const std::string &socksAddress = std::string(),
-           const std::vector<SharePort> &sharePorts = std::vector<SharePort>());
+           const std::vector<SharePort> &sharePorts = std::vector<SharePort>(),
+           const std::string &identityFile = std::string());
     virtual ~Client();
 
     virtual void run();
@@ -45,6 +47,7 @@ public:
     static const Worker::TunnelHeader::Magic magic;
     static const Worker::TunnelHeader::Magic v2Magic;
     static const Worker::TunnelHeader::Magic v3Magic;
+    static const Worker::TunnelHeader::Magic v4Magic;
 protected:
     enum State
     {
@@ -76,6 +79,8 @@ protected:
                               uint16_t id, uint16_t seq);
     void sendV3ToServer(Worker::TunnelHeader::Type type, int dataLength,
                         uint8_t flags, bool trackPoll);
+    bool openV4Packet(const TunnelHeader &header, int &dataLength);
+    void sendV4HandshakeFinish();
     uint32_t echoKey(uint16_t id, uint16_t seq) const;
     const Worker::TunnelHeader::Magic &clientMagic() const;
     const Worker::TunnelHeader::Magic &serverMagic() const;
@@ -98,6 +103,12 @@ protected:
     bool autoPoll;
     int negotiatedCapabilities;
     uint32_t sessionId;
+    uint32_t localReceiverIndex;
+    uint32_t peerReceiverIndex;
+    SecureIdentity secureIdentity;
+    uint8_t securePsk[32];
+    NoiseHandshake *secureHandshake;
+    SecureTransport secureTransport;
     uint32_t nextTransportSequence;
     SequenceTracker receivedSequences;
     AdaptiveCredit adaptiveCredit;

@@ -52,7 +52,8 @@ bool Worker::TunnelHeader::Magic::operator!=(const Magic &other) const
 Worker::Worker(int tunnelMtu, const std::string *deviceName, bool answerEcho,
                uid_t uid, gid_t gid, bool createTun,
                bool preferUnprivilegedEcho)
-    : echo(tunnelMtu + sizeof(TunnelHeader) + TransportV3::HEADER_SIZE,
+    : echo(tunnelMtu + sizeof(TunnelHeader) + TransportV3::HEADER_SIZE +
+           SecureTransport::OVERHEAD,
            preferUnprivilegedEcho),
       tun(deviceName, tunnelMtu, createTun)
 {

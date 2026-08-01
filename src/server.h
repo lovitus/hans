@@ -25,6 +25,7 @@
 #include "config.h"
 #include "transport.h"
 #include "kernel_echo_guard.h"
+#include "secure.h"
 
 #include <map>
 #include <queue>
@@ -39,7 +40,8 @@ class Server : public Worker
 public:
     Server(int tunnelMtu, const std::string *deviceName, const std::string &passphrase,
            uint32_t network, bool answerEcho, uid_t uid, gid_t gid, int pollTimeout,
-           const std::string &leaseFile);
+           const std::string &leaseFile,
+           const std::string &identityFile = std::string());
     virtual ~Server();
 
     static int listPeers(const std::string &leaseFile);
@@ -68,6 +70,7 @@ public:
     static const TunnelHeader::Magic magic;
     static const TunnelHeader::Magic v2Magic;
     static const TunnelHeader::Magic v3Magic;
+    static const TunnelHeader::Magic v4Magic;
 
 protected:
     struct Packet
@@ -103,6 +106,10 @@ protected:
         bool autoPoll;
         uint8_t transportMode;
         uint32_t sessionId;
+        uint32_t localReceiverIndex;
+        uint32_t peerReceiverIndex;
+        NoiseHandshake *secureHandshake;
+        SecureTransport secureTransport;
         uint32_t nextTransportSequence;
         SequenceTracker receivedSequences;
         EchoId lastEcho;
@@ -145,6 +152,10 @@ protected:
     void serveTun(ClientData *client);
 
     void handleUnknownClient(const TunnelHeader &header, int dataLength, uint32_t realIp, uint16_t echoId, uint16_t echoSeq);
+    void handleV4HandshakeInit(const TunnelHeader &header, int dataLength,
+                               uint32_t realIp, uint16_t echoId, uint16_t echoSeq);
+    void handleV4HandshakeFinish(const TunnelHeader &header, int dataLength,
+                                 uint32_t realIp, uint16_t echoId, uint16_t echoSeq);
     void removeClient(ClientData *client);
 
     void sendChallenge(ClientData *client);
@@ -159,6 +170,11 @@ protected:
                                 uint16_t echoSeq);
     bool parseTransportHeader(ClientData *client, int &dataLength,
                               TransportV3::Header &transport);
+    bool openV4Packet(ClientData *client, const TunnelHeader &header,
+                      int &dataLength, uint32_t realIp);
+    void sendV4RawToClient(ClientData *client, TunnelHeader::Type type,
+                           const char *data, int dataLength,
+                           uint16_t echoId, uint16_t echoSeq);
     void processTransportAck(ClientData *client,
                              const TransportV3::Header &transport);
     bool directPathFailed(ClientData *client) const;
@@ -174,6 +190,7 @@ protected:
 
     ClientData *getClientByTunnelIp(uint32_t ip);
     ClientData *getClientByRealIp(uint32_t ip);
+    ClientData *getClientByReceiverIndex(uint32_t index);
     ClientData *getClientByDeviceId(const std::string &deviceId, ClientData *except);
 
     Auth auth;
@@ -191,6 +208,9 @@ protected:
     ClientList clientList;
     ClientIpMap clientRealIpMap;
     ClientIpMap clientTunnelIpMap;
+    ClientIpMap clientReceiverIndexMap;
+    SecureIdentity secureIdentity;
+    uint8_t securePsk[32];
     KernelEchoGuard kernelEchoGuard;
 };
 

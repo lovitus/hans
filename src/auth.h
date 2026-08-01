@@ -40,6 +40,7 @@ public:
 
     Challenge generateChallenge(int length) const;
     Response getResponse(const Challenge &challenge) const;
+    const std::string &password() const { return passphrase; }
 
 protected:
     std::string passphrase;

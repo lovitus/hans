@@ -74,6 +74,31 @@ uint32_t Utility::random32()
     return value == 0 ? 1 : value;
 }
 
+void Utility::secureRandom(void *output, size_t length)
+{
+    unsigned char *data = static_cast<unsigned char *>(output);
+    int randomFd = open("/dev/urandom", O_RDONLY);
+    if (randomFd == -1)
+        throw Exception("opening operating-system random source", true);
+    size_t offset = 0;
+    while (offset < length)
+    {
+        ssize_t count = read(randomFd, data + offset, length - offset);
+        if (count > 0)
+            offset += (size_t)count;
+        else if (count < 0 && errno == EINTR)
+            continue;
+        else
+        {
+            int saved = errno;
+            close(randomFd);
+            errno = saved;
+            throw Exception("reading operating-system random source", true);
+        }
+    }
+    close(randomFd);
+}
+
 bool Utility::isDeviceId(const string &id)
 {
     if (id.size() != DEVICE_ID_HEX_SIZE)

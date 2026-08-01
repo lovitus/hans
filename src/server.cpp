@@ -44,6 +44,7 @@ using std::endl;
 const Worker::TunnelHeader::Magic Server::magic("hans");
 const Worker::TunnelHeader::Magic Server::v2Magic("hns2");
 const Worker::TunnelHeader::Magic Server::v3Magic("hns3");
+const Worker::TunnelHeader::Magic Server::v4Magic("hns4");
 
 namespace
 {
@@ -55,11 +56,18 @@ namespace
         value = htonl(value);
         memcpy(buffer, &value, sizeof(value));
     }
+
+    uint32_t get32(const char *buffer)
+    {
+        uint32_t value;
+        memcpy(&value, buffer, sizeof(value));
+        return ntohl(value);
+    }
 }
 
 Server::Server(int tunnelMtu, const string *deviceName, const string &passphrase,
                uint32_t network, bool answerEcho, uid_t uid, gid_t gid, int pollTimeout,
-               const string &leaseFile)
+               const string &leaseFile, const string &identityFile)
     : Worker(tunnelMtu, deviceName, answerEcho, uid, gid), auth(passphrase)
 {
     this->network = network & 0xffffff00;
@@ -67,6 +75,10 @@ Server::Server(int tunnelMtu, const string *deviceName, const string &passphrase
     this->latestAssignedIpOffset = FIRST_ASSIGNED_IP_OFFSET - 1;
     this->leaseFile = leaseFile;
     this->leaseFd = -1;
+    secureIdentity.loadOrCreate(identityFile.empty() ?
+                                Utility::defaultStateFile("server.key") :
+                                identityFile);
+    NoiseHandshake::derivePsk(passphrase, securePsk);
 
     tun.setIp(this->network + 1, this->network + 2);
 
@@ -81,11 +93,15 @@ Server::Server(int tunnelMtu, const string *deviceName, const string &passphrase
 
 Server::~Server()
 {
+    for (ClientList::iterator client = clientList.begin();
+         client != clientList.end(); ++client)
+        delete client->secureHandshake;
     for (LeaseMap::iterator it = leases.begin(); it != leases.end(); ++it)
         it->second.active = false;
     saveLeases();
     if (leaseFd != -1)
         close(leaseFd);
+    memset(securePsk, 0, sizeof(securePsk));
 }
 
 void Server::handleUnknownClient(const TunnelHeader &header, int dataLength, uint32_t realIp, uint16_t echoId, uint16_t echoSeq)
@@ -99,6 +115,9 @@ void Server::handleUnknownClient(const TunnelHeader &header, int dataLength, uin
     client.autoPoll = false;
     client.transportMode = TransportV3::MODE_CREDIT;
     client.sessionId = 0;
+    client.localReceiverIndex = 0;
+    client.peerReceiverIndex = 0;
+    client.secureHandshake = NULL;
     client.nextTransportSequence = Utility::random32();
     client.haveLastEcho = false;
     client.backlogHint = 0;
@@ -210,12 +229,163 @@ void Server::removeClient(ClientData *client)
 
     releaseTunnelIp(client->tunnelIp, client->deviceId);
 
-    ClientList::iterator it = clientRealIpMap[client->realIp];
+    ClientList::iterator it = clientList.end();
+    for (ClientList::iterator candidate = clientList.begin();
+         candidate != clientList.end(); ++candidate)
+        if (&*candidate == client)
+        {
+            it = candidate;
+            break;
+        }
+    if (it == clientList.end())
+        return;
 
-    clientRealIpMap.erase(client->realIp);
+    if (client->protocolVersion < 4)
+        clientRealIpMap.erase(client->realIp);
+    else
+        clientReceiverIndexMap.erase(client->localReceiverIndex);
     clientTunnelIpMap.erase(client->tunnelIp);
-
+    delete client->secureHandshake;
+    client->secureHandshake = NULL;
     clientList.erase(it);
+}
+
+void Server::handleV4HandshakeInit(const TunnelHeader &, int dataLength,
+                                   uint32_t realIp, uint16_t echoId,
+                                   uint16_t echoSeq)
+{
+    if (dataLength != 36)
+        return;
+    uint32_t peerIndex = get32(echoReceivePayloadBuffer());
+    if (peerIndex == 0)
+        return;
+
+    ClientData client;
+    client.realIp = realIp;
+    client.tunnelIp = 0;
+    client.desiredIp = 0;
+    client.protocolVersion = 4;
+    client.capabilities = 0;
+    client.autoPoll = false;
+    client.transportMode = TransportV3::MODE_CREDIT;
+    client.sessionId = 0;
+    client.localReceiverIndex = 0;
+    do client.localReceiverIndex = Utility::random32();
+    while (clientReceiverIndexMap.count(client.localReceiverIndex));
+    client.peerReceiverIndex = peerIndex;
+    client.secureHandshake = new NoiseHandshake(NoiseHandshake::RESPONDER,
+                                                 secureIdentity.secretKey(),
+                                                 securePsk);
+    client.nextTransportSequence = Utility::random32();
+    client.haveLastEcho = false;
+    client.backlogHint = 0;
+    client.maxPolls = 1;
+    client.state = ClientData::STATE_CHALLENGE_SENT;
+    if (!client.secureHandshake->readMessage1(
+            (const uint8_t *)echoReceivePayloadBuffer() + 4, 32))
+    {
+        delete client.secureHandshake;
+        return;
+    }
+    pollReceived(&client, echoId, echoSeq, false);
+    std::vector<uint8_t> response;
+    if (!client.secureHandshake->writeMessage2(response))
+    {
+        delete client.secureHandshake;
+        return;
+    }
+    clientList.push_front(client);
+    clientReceiverIndexMap[client.localReceiverIndex] = clientList.begin();
+    put32(echoSendPayloadBuffer(), client.localReceiverIndex);
+    put32(echoSendPayloadBuffer() + 4, client.peerReceiverIndex);
+    memcpy(echoSendPayloadBuffer() + 8, &response[0], response.size());
+    sendEcho(v4Magic, TunnelHeader::TYPE_HANDSHAKE_RESPONSE,
+             8 + response.size(), realIp, true, echoId, echoSeq);
+}
+
+void Server::handleV4HandshakeFinish(const TunnelHeader &, int dataLength,
+                                     uint32_t realIp, uint16_t echoId,
+                                     uint16_t echoSeq)
+{
+    if (dataLength < 72)
+        return;
+    uint32_t peerIndex = get32(echoReceivePayloadBuffer());
+    uint32_t localIndex = get32(echoReceivePayloadBuffer() + 4);
+    ClientData *client = getClientByReceiverIndex(localIndex);
+    if (client == NULL || client->state != ClientData::STATE_CHALLENGE_SENT ||
+        client->peerReceiverIndex != peerIndex || client->realIp != realIp ||
+        client->secureHandshake == NULL)
+        return;
+    std::vector<uint8_t> decoded;
+    if (!client->secureHandshake->readMessage3(
+            (const uint8_t *)echoReceivePayloadBuffer() + 8,
+            dataLength - 8, decoded) ||
+        decoded.size() != sizeof(ClientConnectDataV3))
+    {
+        syslog(LOG_WARNING, "secure authentication failed for %s",
+               Utility::formatIp(realIp).c_str());
+        removeClient(client);
+        return;
+    }
+    ClientConnectDataV3 connectData;
+    memcpy(&connectData, &decoded[0], sizeof(connectData));
+    string receivedId(connectData.v2.deviceId, DEVICE_ID_HEX_SIZE);
+    if (!Utility::isDeviceId(receivedId))
+    {
+        removeClient(client);
+        return;
+    }
+    // In v4 the authenticated static Noise key is the durable device
+    // identity.  The encrypted legacy field remains on the wire only for
+    // layout compatibility and is never trusted for lease ownership.
+    client->deviceId = SecureIdentity::fingerprint(
+        client->secureHandshake->remoteStaticKey());
+    client->desiredIp = connectData.v2.legacy.desiredIp;
+    client->capabilities = connectData.capabilities & TransportV3::ALL_CAPABILITIES;
+    client->autoPoll = (client->capabilities & TransportV3::CAP_ADAPTIVE_CREDIT) != 0;
+    client->maxPolls = connectData.v2.legacy.maxPolls;
+    if (client->autoPoll)
+    {
+        if (client->maxPolls < 2) client->maxPolls = 2;
+        if (client->maxPolls > 128) client->maxPolls = 128;
+    }
+    if (!client->autoPoll && client->maxPolls == 0)
+        client->transportMode = TransportV3::MODE_DIRECT;
+    if (connectData.capabilities & TransportV3::CAP_WINDOWS_ICMP_HELPER)
+        kernelEchoGuard.suppress();
+
+    ClientData *oldClient = getClientByDeviceId(client->deviceId, client);
+    if (oldClient != NULL)
+        removeClient(oldClient);
+    client->tunnelIp = reserveTunnelIp(client->desiredIp, client->deviceId);
+    if (client->tunnelIp == 0)
+    {
+        removeClient(client);
+        return;
+    }
+    clientTunnelIpMap[client->tunnelIp] =
+        clientReceiverIndexMap[client->localReceiverIndex];
+    client->sessionId = Utility::random32();
+    client->secureTransport.initialize(client->peerReceiverIndex,
+                                       client->localReceiverIndex,
+                                       client->secureHandshake->sendKey(),
+                                       client->secureHandshake->receiveKey());
+    delete client->secureHandshake;
+    client->secureHandshake = NULL;
+    pollReceived(client, echoId, echoSeq, false);
+
+    char accept[12];
+    put32(accept, client->tunnelIp);
+    put32(accept + 4, client->sessionId);
+    accept[8] = (char)client->capabilities;
+    accept[9] = (char)client->transportMode;
+    accept[10] = accept[11] = 0;
+    sendV4RawToClient(client, TunnelHeader::TYPE_CONNECTION_ACCEPT,
+                      accept, sizeof(accept), echoId, echoSeq);
+    client->state = ClientData::STATE_ESTABLISHED;
+    updateLease(client, true);
+    syslog(LOG_INFO, "secure protocol v4 connection established to %s (device %s)",
+           Utility::formatIp(realIp).c_str(), client->deviceId.c_str());
 }
 
 void Server::checkChallenge(ClientData *client, int length)
@@ -284,6 +454,82 @@ bool Server::handleEchoData(const TunnelHeader &header, int dataLength, uint32_t
 {
     if (reply)
         return false;
+
+    if (header.magic == Client::v4Magic)
+    {
+        if (header.type == TunnelHeader::TYPE_HANDSHAKE_INIT)
+        {
+            handleV4HandshakeInit(header, dataLength, realIp, id, seq);
+            return true;
+        }
+        if (header.type == TunnelHeader::TYPE_HANDSHAKE_FINISH)
+        {
+            handleV4HandshakeFinish(header, dataLength, realIp, id, seq);
+            return true;
+        }
+        if (dataLength < 4)
+            return true;
+        ClientData *secureClient = getClientByReceiverIndex(
+            get32(echoReceivePayloadBuffer()));
+        if (secureClient == NULL || secureClient->state != ClientData::STATE_ESTABLISHED ||
+            !openV4Packet(secureClient, header, dataLength, realIp))
+            return true;
+        ClientData *client = secureClient;
+        TransportV3::Header transport;
+        if (!parseTransportHeader(client, dataLength, transport))
+            return true;
+        processTransportAck(client, transport);
+        if (client->autoPoll)
+        {
+            int requested = transport.creditTarget;
+            if (requested < 2) requested = 2;
+            if (requested > 128) requested = 128;
+            client->maxPolls = requested;
+        }
+        bool isControl = header.type == TunnelHeader::TYPE_DIRECT_PROBE ||
+                         header.type == TunnelHeader::TYPE_MODE_SET ||
+                         header.type == TunnelHeader::TYPE_TRANSPORT_PING;
+        pollReceived(client, id, seq, !isControl);
+        // Continue in the common type switch below with the authenticated client.
+        switch (header.type)
+        {
+            case TunnelHeader::TYPE_DATA:
+                if (dataLength > 0)
+                    tun.write(echoReceivePayloadBuffer() + TransportV3::HEADER_SIZE,
+                              dataLength);
+                return true;
+            case TunnelHeader::TYPE_POLL:
+                return true;
+            case TunnelHeader::TYPE_DIRECT_PROBE:
+                if (client->autoPoll &&
+                    (client->capabilities & TransportV3::CAP_DIRECT_REPLY))
+                    sendDirectProbeReplies(client, id, seq);
+                return true;
+            case TunnelHeader::TYPE_MODE_SET:
+                if (dataLength == 1)
+                {
+                    uint8_t requested = (uint8_t)echoReceivePayloadBuffer()
+                                        [TransportV3::HEADER_SIZE];
+                    client->transportMode = requested == TransportV3::MODE_DIRECT &&
+                        (client->capabilities & TransportV3::CAP_DIRECT_REPLY) ?
+                        TransportV3::MODE_DIRECT : TransportV3::MODE_CREDIT;
+                    if (client->transportMode == TransportV3::MODE_DIRECT)
+                        while (!client->pollIds.empty()) client->pollIds.pop();
+                    else
+                        client->directUnacked.clear();
+                    echoSendPayloadBuffer()[0] = client->transportMode;
+                    sendV3ToClient(client, TunnelHeader::TYPE_MODE_ACK, 1,
+                                   TransportV3::FLAG_CONTROL, true, id, seq);
+                }
+                return true;
+            case TunnelHeader::TYPE_TRANSPORT_PING:
+                sendV3ToClient(client, TunnelHeader::TYPE_TRANSPORT_PING, 0,
+                               TransportV3::FLAG_CONTROL, true, id, seq);
+                return true;
+            default:
+                return true;
+        }
+    }
 
     if (header.magic != Client::magic && header.magic != Client::v2Magic &&
         header.magic != Client::v3Magic)
@@ -454,6 +700,15 @@ Server::ClientData *Server::getClientByRealIp(uint32_t ip)
     return &*it->second;
 }
 
+Server::ClientData *Server::getClientByReceiverIndex(uint32_t index)
+{
+    ClientIpMap::iterator it = clientReceiverIndexMap.find(index);
+    if (it == clientReceiverIndexMap.end())
+        return NULL;
+
+    return &*it->second;
+}
+
 Server::ClientData *Server::getClientByDeviceId(const string &deviceId, ClientData *except)
 {
     if (deviceId.empty())
@@ -531,7 +786,7 @@ void Server::pollReceived(ClientData *client, uint16_t echoId, uint16_t echoSeq,
 
 void Server::sendEchoToClient(ClientData *client, TunnelHeader::Type type, int dataLength)
 {
-    if (client->protocolVersion == 3 &&
+    if (client->protocolVersion >= 3 &&
         client->state == ClientData::STATE_ESTABLISHED)
     {
         sendV3ToClient(client, type, dataLength, TransportV3::FLAG_NONE,
@@ -542,8 +797,9 @@ void Server::sendEchoToClient(ClientData *client, TunnelHeader::Type type, int d
     if (client->maxPolls == 0)
     {
         const TunnelHeader::Magic &responseMagic =
-            client->protocolVersion == 3 ? v3Magic :
-            (client->protocolVersion == 2 ? v2Magic : magic);
+            client->protocolVersion == 4 ? v4Magic :
+            (client->protocolVersion == 3 ? v3Magic :
+            (client->protocolVersion == 2 ? v2Magic : magic));
         sendEcho(responseMagic, type, dataLength,
                  client->realIp, true, client->pollIds.front().id,
                  client->pollIds.front().seq);
@@ -557,8 +813,9 @@ void Server::sendEchoToClient(ClientData *client, TunnelHeader::Type type, int d
 
         DEBUG_ONLY(cout << "sending -> " << client->pollIds.size() << endl);
         const TunnelHeader::Magic &responseMagic =
-            client->protocolVersion == 3 ? v3Magic :
-            (client->protocolVersion == 2 ? v2Magic : magic);
+            client->protocolVersion == 4 ? v4Magic :
+            (client->protocolVersion == 3 ? v3Magic :
+            (client->protocolVersion == 2 ? v2Magic : magic));
         sendEcho(responseMagic, type, dataLength,
                  client->realIp, true, echoId.id, echoId.seq);
         return;
@@ -643,12 +900,70 @@ void Server::sendV3ToClient(ClientData *client, TunnelHeader::Type type,
     transport.timestamp = (uint16_t)((now.milliseconds() / 16) & 0xffff);
     TransportV3::encode(payload, transport);
 
-    sendEcho(v3Magic, type, dataLength + TransportV3::HEADER_SIZE,
+    int wireLength = dataLength + TransportV3::HEADER_SIZE;
+    const TunnelHeader::Magic *wireMagic = &v3Magic;
+    if (client->protocolVersion == 4)
+    {
+        TunnelHeader ad;
+        ad.magic = v4Magic;
+        ad.type = type;
+        std::vector<uint8_t> packet;
+        if (!client->secureTransport.seal((const uint8_t *)&ad, sizeof(ad),
+                                          (const uint8_t *)payload,
+                                          wireLength, packet))
+            return;
+        memcpy(payload, &packet[0], packet.size());
+        wireLength = packet.size();
+        wireMagic = &v4Magic;
+    }
+
+    sendEcho(*wireMagic, type, wireLength,
              client->realIp, true, target.id, target.seq);
 
     if (!forceEcho && client->transportMode == TransportV3::MODE_DIRECT &&
         type == TunnelHeader::TYPE_DATA)
         client->directUnacked[transport.txSequence] = now;
+}
+
+bool Server::openV4Packet(ClientData *client, const TunnelHeader &header,
+                          int &dataLength, uint32_t realIp)
+{
+    std::vector<uint8_t> plain;
+    if (!client->secureTransport.open((const uint8_t *)&header, sizeof(header),
+                                      (const uint8_t *)echoReceivePayloadBuffer(),
+                                      dataLength, plain))
+        return false;
+    if (!plain.empty())
+        memcpy(echoReceivePayloadBuffer(), &plain[0], plain.size());
+    dataLength = plain.size();
+
+    // The receiver index and AEAD authenticate this peer, so a changed source
+    // address is safe to adopt after (and only after) successful decryption.
+    if (client->realIp != realIp)
+    {
+        syslog(LOG_INFO, "secure peer %s roamed from %s to %s",
+               client->deviceId.c_str(), Utility::formatIp(client->realIp).c_str(),
+               Utility::formatIp(realIp).c_str());
+        client->realIp = realIp;
+        updateLease(client, true);
+    }
+    return true;
+}
+
+void Server::sendV4RawToClient(ClientData *client, TunnelHeader::Type type,
+                               const char *data, int dataLength,
+                               uint16_t echoId, uint16_t echoSeq)
+{
+    TunnelHeader ad;
+    ad.magic = v4Magic;
+    ad.type = type;
+    std::vector<uint8_t> packet;
+    if (!client->secureTransport.seal((const uint8_t *)&ad, sizeof(ad),
+                                      (const uint8_t *)data, dataLength, packet))
+        return;
+    memcpy(echoSendPayloadBuffer(), &packet[0], packet.size());
+    sendEcho(v4Magic, type, packet.size(), client->realIp, true,
+             echoId, echoSeq);
 }
 
 void Server::sendDirectProbeReplies(ClientData *client, uint16_t echoId,

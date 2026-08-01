@@ -24,6 +24,7 @@
 #include "echo.h"
 #include "tun.h"
 #include "transport.h"
+#include "secure.h"
 
 #include <string>
 #include <sys/types.h>
@@ -42,7 +43,8 @@ public:
 
     static int headerSize()
     {
-        return sizeof(TunnelHeader) + TransportV3::HEADER_SIZE;
+        return sizeof(TunnelHeader) + TransportV3::HEADER_SIZE +
+               SecureTransport::OVERHEAD;
     }
 
 protected:
@@ -74,7 +76,10 @@ protected:
             TYPE_DIRECT_PROBE_REPLY = 11,
             TYPE_MODE_SET = 12,
             TYPE_MODE_ACK = 13,
-            TYPE_TRANSPORT_PING = 14
+            TYPE_TRANSPORT_PING = 14,
+            TYPE_HANDSHAKE_INIT = 15,
+            TYPE_HANDSHAKE_RESPONSE = 16,
+            TYPE_HANDSHAKE_FINISH = 17
         };
 
         Magic magic;
@@ -103,7 +108,7 @@ protected:
 
     int payloadBufferSize()
     {
-        return tunnelMtu + TransportV3::HEADER_SIZE;
+        return tunnelMtu + TransportV3::HEADER_SIZE + SecureTransport::OVERHEAD;
     }
 
     void dropPrivileges();
