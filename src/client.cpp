@@ -27,6 +27,9 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <syslog.h>
+#ifndef __STDC_FORMAT_MACROS
+#define __STDC_FORMAT_MACROS
+#endif
 #include <inttypes.h>
 #include <algorithm>
 
