@@ -119,6 +119,10 @@ tcp_input(struct pbuf *p, struct netif *inp)
 {
   struct tcp_pcb *pcb, *prev;
   struct tcp_pcb_listen *lpcb;
+#if defined(HANS_TCP_WILDCARD_LISTENER) && HANS_TCP_WILDCARD_LISTENER
+  struct tcp_pcb *lpcb_wildcard_prev = NULL;
+  struct tcp_pcb_listen *lpcb_wildcard = NULL;
+#endif
 #if SO_REUSE
   struct tcp_pcb *lpcb_prev = NULL;
   struct tcp_pcb_listen *lpcb_any = NULL;
@@ -323,6 +327,21 @@ tcp_input(struct pbuf *p, struct netif *inp)
         continue;
       }
 
+#if defined(HANS_TCP_WILDCARD_LISTENER) && HANS_TCP_WILDCARD_LISTENER
+      /* Remember Hans' port-zero fallback, but keep scanning so a
+         user-configured exact listener always takes precedence. */
+      if ((lpcb->local_port == 0) &&
+          (IP_IS_ANY_TYPE_VAL(lpcb->local_ip) ||
+           (IP_ADDR_PCB_VERSION_MATCH_EXACT(lpcb, ip_current_dest_addr()) &&
+            (ip_addr_eq(&lpcb->local_ip, ip_current_dest_addr()) ||
+             ip_addr_isany(&lpcb->local_ip))))) {
+        lpcb_wildcard = lpcb;
+        lpcb_wildcard_prev = prev;
+        prev = (struct tcp_pcb *)lpcb;
+        continue;
+      }
+#endif
+
       if (lpcb->local_port == tcphdr->dest) {
         if (IP_IS_ANY_TYPE_VAL(lpcb->local_ip)) {
           /* found an ANY TYPE (IPv4/IPv6) match */
@@ -357,6 +376,12 @@ tcp_input(struct pbuf *p, struct netif *inp)
       prev = lpcb_prev;
     }
 #endif /* SO_REUSE */
+#if defined(HANS_TCP_WILDCARD_LISTENER) && HANS_TCP_WILDCARD_LISTENER
+    if (lpcb == NULL) {
+      lpcb = lpcb_wildcard;
+      prev = lpcb_wildcard_prev;
+    }
+#endif
     if (lpcb != NULL) {
       /* Move this PCB to the front of the list so that subsequent
          lookups will be faster (we exploit locality in TCP segment
@@ -675,7 +700,11 @@ tcp_listen_input(struct tcp_pcb_listen *pcb)
     /* Set up the new PCB. */
     ip_addr_copy(npcb->local_ip, *ip_current_dest_addr());
     ip_addr_copy(npcb->remote_ip, *ip_current_src_addr());
+#if defined(HANS_TCP_WILDCARD_LISTENER) && HANS_TCP_WILDCARD_LISTENER
+    npcb->local_port = pcb->local_port == 0 ? tcphdr->dest : pcb->local_port;
+#else
     npcb->local_port = pcb->local_port;
+#endif
     npcb->remote_port = tcphdr->src;
     npcb->state = SYN_RCVD;
     npcb->rcv_nxt = seqno + 1;

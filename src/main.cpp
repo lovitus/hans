@@ -96,7 +96,7 @@ static void usage()
         "  hans -c server [-fv] [-p passphrase] [-u user] [-d tun_device]\n"
         "       [-m reference_mtu] [-w auto|polls] [--device-id id]\n"
         "       [--device-id-file path] [--feature userspace]\n"
-        "       [--socks5 IPv4:port] [--shareports mappings]\n"
+        "       [--socks5 IPv4:port] [--shareports mappings] [--allports]\n"
         "       [--identity-file path] [--server-fingerprint hex] [--require-v4]\n\n"
         "RUN AS SERVER (linux only)\n"
         "  hans -s network [-fvr] [-p passphrase] [-u user] [-d tun_device]\n"
@@ -144,6 +144,8 @@ static void usage()
         "  --shareports mappings\n"
         "                Share VPN ports. A plain port maps to 127.0.0.1:same-port;\n"
         "                use listen-port=target-ip:target-port to override it.\n"
+        "  --allports    Share every otherwise-unmapped TCP port to\n"
+        "                127.0.0.1:same-port. Explicit --shareports win.\n"
         "  --identity-file path\n"
         "                Load/create the Noise static key at this path.\n"
         "  --show-identity\n"
@@ -188,6 +190,7 @@ int main(int argc, char *argv[])
     bool userspace = false;
     string socksAddress;
     vector<SharePort> sharePorts;
+    bool allPorts = false;
     string identityFile;
     string serverFingerprint;
     bool showIdentity = false;
@@ -201,6 +204,7 @@ int main(int argc, char *argv[])
     openlog(argv[0], LOG_PERROR, LOG_DAEMON);
 
     enum { OPTION_FEATURE = 1000, OPTION_SOCKS5, OPTION_SHAREPORTS,
+           OPTION_ALLPORTS,
            OPTION_IDENTITY_FILE, OPTION_SHOW_IDENTITY,
            OPTION_SERVER_FINGERPRINT, OPTION_REQUIRE_V4,
            OPTION_SOCKS5_USER, OPTION_SOCKS5_PASSWORD_FILE, OPTION_JSON,
@@ -214,6 +218,7 @@ int main(int argc, char *argv[])
         {"feature", required_argument, NULL, OPTION_FEATURE},
         {"socks5", required_argument, NULL, OPTION_SOCKS5},
         {"shareports", required_argument, NULL, OPTION_SHAREPORTS},
+        {"allports", no_argument, NULL, OPTION_ALLPORTS},
         {"identity-file", required_argument, NULL, OPTION_IDENTITY_FILE},
         {"show-identity", no_argument, NULL, OPTION_SHOW_IDENTITY},
         {"server-fingerprint", required_argument, NULL, OPTION_SERVER_FINGERPRINT},
@@ -325,6 +330,9 @@ int main(int argc, char *argv[])
                 }
                 break;
             }
+            case OPTION_ALLPORTS:
+                allPorts = true;
+                break;
             case OPTION_IDENTITY_FILE:
                 identityFile = optarg;
                 break;
@@ -487,8 +495,9 @@ int main(int argc, char *argv[])
         (isServer && network == INADDR_NONE) ||
         (maxPolls < -1 || maxPolls > 255) ||
         (isServer && (changeEchoSeq || changeEchoId)) ||
-        (userspace && (!isClient || (socksAddress.empty() && sharePorts.empty()))) ||
-        (!userspace && (!socksAddress.empty() || !sharePorts.empty())) ||
+        (userspace && (!isClient ||
+                       (socksAddress.empty() && sharePorts.empty() && !allPorts))) ||
+        (!userspace && (!socksAddress.empty() || !sharePorts.empty() || allPorts)) ||
         (userspace && !device.empty()) ||
         ((!socksUser.empty() || !socksPasswordFile.empty()) &&
          (!userspace || socksAddress.empty())) ||
@@ -589,7 +598,8 @@ int main(int argc, char *argv[])
             worker = new Client(mtu, device.empty() ? NULL : &device,
                                 serverAddress, maxPolls, passphrase, uid, gid,
                                 changeEchoId, changeEchoSeq, clientIp, deviceId,
-                                userspace, socksAddress, sharePorts, identityFile,
+                                userspace, socksAddress, sharePorts, allPorts,
+                                identityFile,
                                 requireV4, serverFingerprint, socksUser,
                                 socksPassword);
 

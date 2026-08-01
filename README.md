@@ -23,7 +23,7 @@ deployment, compatibility, and peer-management features:
 | Adaptive timing and MTU | Retransmission timeout follows RFC 6298-style smoothed RTT/variance with bounded exponential backoff. v4 peers negotiate the smaller configured inner MTU and lower the server interface conservatively, so differently configured peers do not silently overrun one another. |
 | Direct-reply upgrade and fallback | A client probes whether the path safely passes multiple replies for one echo request. A successful path upgrades to direct replies; sequence/ACK tracking and heartbeats automatically return it to adaptive credits if that path stops working, then probe it again after a quiet interval. |
 | Low-risk data fast path | Release builds enable conservative `-O2` optimization. Linux keeps the single-threaded packet/state owner but uses opportunistic `recvmmsg`/`sendmmsg` batches, bounded TUN queue draining, in-place v4 AEAD, and preallocated contiguous direct-ACK tracking. Packets are never coalesced, batching never waits to fill, and unsupported kernels automatically retain the portable one-packet syscall path. |
-| Adapter-free userspace client | `--feature userspace` replaces TUN/TAP with a statically embedded lwIP stack. It exposes SOCKS5 TCP/UDP access and selected inbound ports while preserving the client's sticky VPN identity and tunnel IP. The normal kernel-interface path is unchanged unless this feature is explicitly selected. |
+| Adapter-free userspace client | `--feature userspace` replaces TUN/TAP with a statically embedded lwIP stack. It exposes SOCKS5 TCP/UDP access, explicit inbound mappings, or an opt-in all-TCP-port loopback fallback while preserving the client's sticky VPN identity and tunnel IP. The normal kernel-interface path is unchanged unless this feature is explicitly selected. |
 | Backward-compatible protocol | New servers still accept v1/v2/v3 clients. New clients try encrypted v4 first, then fall back for older servers unless `--require-v4` is set. `--server-fingerprint` pins the expected server key and prevents impersonation by another member of the same PSK group. |
 | Broad release matrix | GitHub Actions builds Linux, macOS, Windows/Cygwin (amd64 and legacy i386), FreeBSD, OpenBSD, and NetBSD binaries for the CPU architectures supported by the codebase. |
 | Static releases | Linux and BSD release binaries are fully static. Windows compiler/C++ runtimes are embedded in the executable; macOS uses only operating-system libraries. Release binaries are stripped before their isolated package tests to avoid shipping debug symbols. |
@@ -31,7 +31,7 @@ deployment, compatibility, and peer-management features:
 | Adapter fallback | Windows prefers an installed TAP-Windows adapter and automatically falls back to bundled Wintun. Linux prefers TUN and falls back to a veth pair plus `AF_PACKET` when TUN is unavailable. Auto-created interfaces use `hans1`, then `hans2`, and so on. |
 | Safe orphan cleanup | Auto-created Linux veth pairs carry a random ownership marker. On startup Hans removes a pair only when both endpoints and markers match exactly and no live process still owns it; ambiguous interfaces are always retained. |
 | Runtime packaging | Windows compiler and C++ runtimes are linked into `hans.exe`; the package includes the unavoidable `cygwin1.dll` and the signed official `wintun.dll`, allowing use without a separate Cygwin installation. |
-| Automated validation | Every build runs Noise handshake/AEAD/replay and complete v4 framing tests, deterministic parser fuzzing, transport codec, sequence/ACK, adaptive RTO/window, userspace, identity, and lease tests. The main Linux job repeats them under ASan/UBSan. The stripped package is then tested from an isolated product directory after its build environment is removed. Privileged Linux CI verifies negotiated MTU, direct mode, bidirectional TCP, forced-path fallback/recovery, and re-upgrade. Another test runs two same-NAT stripped clients unprivileged without TUN and exercises authenticated SOCKS5 TCP/UDP plus both port-mapping forms. |
+| Automated validation | Every build runs Noise handshake/AEAD/replay and complete v4 framing tests, deterministic parser fuzzing, transport codec, sequence/ACK, adaptive RTO/window, userspace, identity, and lease tests. The main Linux job repeats them under ASan/UBSan. The stripped package is then tested from an isolated product directory after its build environment is removed. Privileged Linux CI verifies negotiated MTU, direct mode, bidirectional TCP, forced-path fallback/recovery, and re-upgrade. Another test runs two same-NAT stripped clients unprivileged without TUN and exercises authenticated SOCKS5 TCP/UDP, both explicit mapping forms, allports fallback, and explicit-over-fallback precedence. |
 | Continuous releases | Successful builds are collected and published automatically on the [Releases page](../../releases). |
 
 ## How it works
@@ -245,10 +245,24 @@ must differ:
 ```
 
 The last form deliberately lets VPN peers reach another host visible from the
-client. Treat it like opening a firewall rule. Only the listed VPN ports are
-accepted; Hans never exposes all 1–65535 ports implicitly. Services reached
-through a shared port see the connection coming from a local host socket, not
-the original peer address.
+client. Treat it like opening a firewall rule. Services reached through a
+shared port see the connection coming from a local host socket, not the
+original peer address.
+
+To make every otherwise-unmapped TCP port available at the same loopback port,
+opt in explicitly:
+
+```sh
+./hans -c server.example.com -p secret -f -v \
+  --feature userspace --allports \
+  --shareports 2222=127.0.0.1:22,8080=192.168.1.20:80
+```
+
+Hans checks explicit mappings first. A SYN for port 2222 or 8080 follows the
+configured target; any other TCP destination port `N` creates an on-demand
+bridge to `127.0.0.1:N`. One internal fallback listener handles this without
+opening 65535 sockets or spawning `socat`; bridges exist only for active
+connections. This option is intentionally not enabled by default.
 
 The SOCKS listener defaults to `127.0.0.1`. For a shared listener, enable
 dependency-free RFC 1929 authentication and keep the password off the command
@@ -458,7 +472,7 @@ RUN AS CLIENT
   hans -c server [-fv] [-p passphrase] [-u user] [-d tun_device]
        [-m reference_mtu] [-w auto|polls] [--device-id id]
        [--device-id-file path] [--feature userspace]
-       [--socks5 IPv4:port] [--shareports mappings]
+       [--socks5 IPv4:port] [--shareports mappings] [--allports]
        [--identity-file path] [--server-fingerprint hex] [--require-v4]
 
 RUN AS SERVER (linux only)
@@ -501,6 +515,8 @@ ARGUMENTS
   --shareports mappings
                 Share VPN ports; plain N maps to 127.0.0.1:N, while
                 listen=target-ip:target-port specifies an explicit target.
+  --allports    Share every otherwise-unmapped TCP port to 127.0.0.1:same-port.
+                Explicit --shareports mappings take precedence.
   --socks5-user name
                 Require RFC 1929 username/password authentication.
   --socks5-password-file path

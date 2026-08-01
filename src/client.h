@@ -40,6 +40,7 @@ public:
            const std::string &deviceId, bool userspace = false,
            const std::string &socksAddress = std::string(),
            const std::vector<SharePort> &sharePorts = std::vector<SharePort>(),
+           bool allPorts = false,
            const std::string &identityFile = std::string(),
            bool requireV4 = false,
            const std::string &serverFingerprint = std::string(),

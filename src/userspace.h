@@ -26,6 +26,7 @@ public:
     UserspaceNetwork(UserspaceNetworkObserver *observer, int mtu,
                      const std::string &socksAddress,
                      const std::vector<SharePort> &sharePorts,
+                     bool allPorts = false,
                      const std::string &socksUser = std::string(),
                      const std::string &socksPassword = std::string());
     ~UserspaceNetwork();

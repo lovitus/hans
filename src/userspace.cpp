@@ -166,10 +166,11 @@ public:
 
     Impl(UserspaceNetworkObserver *observer, int mtu,
          const string &socksAddress, const vector<SharePort> &sharePorts,
-         const string &socksUser, const string &socksPassword)
+         bool allPorts, const string &socksUser, const string &socksPassword)
         : observer(observer), mtu(mtu), socksAddress(socksAddress),
-          sharePorts(sharePorts), socksUser(socksUser),
-          socksPassword(socksPassword), socksFd(-1), configured(false)
+          sharePorts(sharePorts), allPorts(allPorts), socksUser(socksUser),
+          socksPassword(socksPassword), socksFd(-1), configured(false),
+          outputBuffer(mtu > 0 ? (size_t)mtu : 1)
     {
         memset(&interface, 0, sizeof(interface));
         lwip_init();
@@ -207,9 +208,10 @@ public:
                               const ip4_addr_t *)
     {
         Impl *self = static_cast<Impl *>(netif->state);
-        vector<char> packet(p->tot_len);
-        pbuf_copy_partial(p, &packet[0], p->tot_len, 0);
-        self->observer->sendUserspacePacket(&packet[0], (int)packet.size());
+        if (self->outputBuffer.size() < p->tot_len)
+            self->outputBuffer.resize(p->tot_len);
+        pbuf_copy_partial(p, &self->outputBuffer[0], p->tot_len, 0);
+        self->observer->sendUserspacePacket(&self->outputBuffer[0], p->tot_len);
         return ERR_OK;
     }
 
@@ -233,12 +235,22 @@ public:
 
         for (size_t i = 0; i < sharePorts.size(); ++i)
             openSharedListener(sharePorts[i]);
+        if (allPorts)
+        {
+            SharePort fallback;
+            fallback.listenPort = 0;
+            fallback.targetIp = 0x7f000001u;
+            fallback.targetPort = 0;
+            openSharedListener(fallback);
+        }
         syslog(LOG_INFO, "userspace network ready at %s", Utility::formatIp(ip).c_str());
     }
 
     void setMtu(int newMtu)
     {
         mtu = newMtu;
+        if (newMtu > 0 && outputBuffer.size() < (size_t)newMtu)
+            outputBuffer.resize(newMtu);
         if (configured)
             interface.mtu = (u16_t)newMtu;
     }
@@ -304,7 +316,13 @@ public:
         }
         ip_addr_t bindAddress;
         ip_addr_copy_from_ip4(bindAddress, *netif_ip4_addr(&interface));
-        if (tcp_bind(listener->pcb, &bindAddress, mapping.listenPort) != ERR_OK)
+        err_t bindResult = ERR_OK;
+        if (mapping.listenPort == 0)
+            ip_addr_copy(listener->pcb->local_ip, bindAddress);
+        else
+            bindResult = tcp_bind(listener->pcb, &bindAddress,
+                                  mapping.listenPort);
+        if (bindResult != ERR_OK)
         {
             tcp_abort(listener->pcb);
             delete listener;
@@ -321,9 +339,13 @@ public:
         tcp_arg(listening, listener);
         tcp_accept(listening, acceptShared);
         sharedListeners.push_back(listener);
-        syslog(LOG_INFO, "sharing VPN port %u to %s:%u",
-               (unsigned)mapping.listenPort, Utility::formatIp(mapping.targetIp).c_str(),
-               (unsigned)mapping.targetPort);
+        if (mapping.listenPort == 0)
+            syslog(LOG_INFO, "sharing otherwise-unmapped VPN TCP ports to 127.0.0.1:same-port");
+        else
+            syslog(LOG_INFO, "sharing VPN port %u to %s:%u",
+                   (unsigned)mapping.listenPort,
+                   Utility::formatIp(mapping.targetIp).c_str(),
+                   (unsigned)mapping.targetPort);
     }
 
     static err_t acceptShared(void *arg, struct tcp_pcb *newPcb, err_t error)
@@ -335,8 +357,11 @@ public:
         connection->pcb = newPcb;
         tcp_backlog_accepted(newPcb);
         listener->owner->attachTcp(connection);
+        uint16_t targetPort = listener->mapping.targetPort == 0 ?
+                              newPcb->local_port :
+                              listener->mapping.targetPort;
         if (!listener->owner->connectHost(connection, listener->mapping.targetIp,
-                                           listener->mapping.targetPort))
+                                           targetPort))
         {
             listener->owner->abortTcp(connection);
             delete connection;
@@ -845,7 +870,19 @@ public:
                 consumeBytes(connection->networkOut, connection->networkOffset,
                              (size_t)sent);
                 if (connection->pcb != NULL)
-                    tcp_recved(connection->pcb, (u16_t)sent);
+                {
+                    /* tcp_recved accepts only u16_t. A fast loopback target
+                     * can consume much more in one send(), so truncating the
+                     * count eventually leaves the advertised window at zero. */
+                    size_t remaining = (size_t)sent;
+                    while (remaining > 0)
+                    {
+                        u16_t credited = (u16_t)std::min(
+                            remaining, (size_t)65535);
+                        tcp_recved(connection->pcb, credited);
+                        remaining -= credited;
+                    }
+                }
             }
             else
             {
@@ -1133,12 +1170,14 @@ public:
     int mtu;
     string socksAddress;
     vector<SharePort> sharePorts;
+    bool allPorts;
     string socksUser;
     string socksPassword;
     int socksFd;
     uint32_t socksBindIp;
     bool configured;
     struct netif interface;
+    vector<char> outputBuffer;
     vector<Connection *> connections;
     vector<SharedListener *> sharedListeners;
 };
@@ -1146,10 +1185,11 @@ public:
 UserspaceNetwork::UserspaceNetwork(UserspaceNetworkObserver *observer, int mtu,
                                    const string &socksAddress,
                                    const vector<SharePort> &sharePorts,
+                                   bool allPorts,
                                    const string &socksUser,
                                    const string &socksPassword)
     : impl(new Impl(observer, mtu, socksAddress, sharePorts,
-                    socksUser, socksPassword))
+                    allPorts, socksUser, socksPassword))
 {
 }
 

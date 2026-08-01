@@ -70,6 +70,7 @@ Client::Client(int tunnelMtu, const string *deviceName,
                const string &deviceId, bool userspace,
                const string &socksAddress,
                const vector<SharePort> &sharePorts,
+               bool allPorts,
                const string &identityFile, bool requireV4,
                const string &serverFingerprint, const string &socksUser,
                const string &socksPassword)
@@ -106,7 +107,7 @@ Client::Client(int tunnelMtu, const string *deviceName,
     this->directProbeReplies = 0;
     this->userspaceNetwork = userspace ?
         new UserspaceNetwork(this, tunnelMtu, socksAddress, sharePorts,
-                             socksUser, socksPassword) : NULL;
+                             allPorts, socksUser, socksPassword) : NULL;
 #ifdef WIN32
     if (userspace)
     {

@@ -55,6 +55,9 @@
 #define LWIP_TCP_KEEPALIVE              1
 #define LWIP_NETIF_TX_SINGLE_PBUF       0
 
+/* One port-zero listener is an on-demand fallback for Hans --allports. */
+#define HANS_TCP_WILDCARD_LISTENER      1
+
 #define IP_REASSEMBLY                   1
 #define IP_FRAG                         1
 #define IP_REASS_MAX_PBUFS              64

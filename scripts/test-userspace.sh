@@ -16,7 +16,8 @@ client_log="$work/client.log"
 
 cleanup() {
     kill "${client_pid:-}" "${server_pid:-}" "${server_http_pid:-}" \
-         "${client2_pid:-}" "${client_http_pid:-}" "${udp_pid:-}" 2>/dev/null || true
+         "${client2_pid:-}" "${client_http_pid:-}" "${allports_http_pid:-}" \
+         "${large_sink_pid:-}" "${udp_pid:-}" 2>/dev/null || true
     ip netns delete "$client_ns" 2>/dev/null || true
     ip netns delete "$server_ns" 2>/dev/null || true
 }
@@ -85,6 +86,20 @@ server_http_pid=$!
 ip netns exec "$client_ns" python3 -m http.server 18081 \
     --bind 127.0.0.1 --directory "$(dirname "$BINABS")" >"$work/client-http.log" 2>&1 &
 client_http_pid=$!
+ip netns exec "$client_ns" python3 -m http.server 18086 \
+    --bind 127.0.0.1 --directory "$(dirname "$BINABS")" >"$work/allports-http.log" 2>&1 &
+allports_http_pid=$!
+ip netns exec "$client_ns" python3 -c \
+    'import socket
+s=socket.socket();s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1);s.bind(("127.0.0.1",18087));s.listen(1)
+c,_=s.accept();total=0
+while True:
+ d=c.recv(65536)
+ if not d: break
+ total+=len(d)
+c.sendall(str(total).encode("ascii"));c.close();s.close()' \
+    >"$work/large-sink.log" 2>&1 &
+large_sink_pid=$!
 ip netns exec "$server_ns" python3 -c \
     'import socket;s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM);s.bind(("10.77.88.1",18083));exec("while True:\n d,a=s.recvfrom(65535)\n s.sendto(d,a)")' \
     >"$work/server-udp.log" 2>&1 &
@@ -95,7 +110,8 @@ ip netns exec "$client_ns" setpriv --reuid 65534 --regid 65534 --clear-groups \
     -c 192.0.2.1 -p hans-userspace-ci -f -v \
     --feature userspace --socks5 127.0.0.1:18080 \
     --socks5-user hans --socks5-password-file "$work/socks-password" \
-    --shareports 18081,18082=127.0.0.1:18081 >"$client_log" 2>&1 &
+    --shareports 18081,18082=127.0.0.1:18081 --allports \
+    >"$client_log" 2>&1 &
 client_pid=$!
 
 connected=0
@@ -112,6 +128,7 @@ while [ "$attempt" -gt 0 ]; do
 done
 [ "$connected" -eq 1 ]
 grep -q "using unprivileged ICMP ping socket" "$client_log"
+grep -q "sharing otherwise-unmapped VPN TCP ports" "$client_log"
 
 # A second unprivileged userspace process has the same underlay source IP.
 # Protocol v4 must demultiplex it by receiver index and assign an independent
@@ -165,6 +182,24 @@ ip netns exec "$server_ns" curl --fail --silent --show-error --max-time 20 \
     http://10.77.88.100:18082/$(basename "$BINABS") -o "$work/share-explicit-download"
 cmp "$BINABS" "$work/share-explicit-download"
 
+# An otherwise-unmapped destination is bridged on demand to loopback at the
+# same port. The explicit 18082 mapping above must still take precedence over
+# this fallback (there is intentionally no loopback service on port 18082).
+ip netns exec "$server_ns" curl --fail --silent --show-error --max-time 20 \
+    http://10.77.88.100:18086/$(basename "$BINABS") -o "$work/allports-download"
+cmp "$BINABS" "$work/allports-download"
+
+# Drive more than 65535 bytes from VPN to the local socket in a single flow.
+# This catches truncated tcp_recved() window credits, which otherwise stall a
+# fast connection after its advertised receive window is exhausted.
+large_received=$(ip netns exec "$server_ns" python3 -c \
+    'import socket
+s=socket.create_connection(("10.77.88.100",18087),20);s.settimeout(20)
+block=b"x"*65536
+for _ in range(256): s.sendall(block)
+s.shutdown(socket.SHUT_WR);print(s.recv(64).decode("ascii"));s.close()')
+[ "$large_received" = 16777216 ]
+
 ip netns exec "$client_ns" python3 "$(dirname "$BINABS")/test-socks5-udp.py" \
     127.0.0.1 18080 10.77.88.1 18083 hans userspace-secret
 
@@ -184,4 +219,4 @@ done
 
 kill -0 "$server_pid"
 kill -0 "$client_pid"
-echo "OK: unprivileged SOCKS5 TCP/UDP and shared-port userspace tests passed"
+echo "OK: unprivileged SOCKS5 TCP/UDP, explicit sharing, and allports tests passed"
