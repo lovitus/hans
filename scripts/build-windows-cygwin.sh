@@ -21,7 +21,7 @@ done
 make test GPP=g++
 
 make \
-    CPPFLAGS='-c -g -std=gnu++98 -fpermissive -Wall -Wextra -Wno-sign-compare -Wno-missing-field-initializers -DWIN32' \
+    CPPFLAGS='-c -g -O2 -fno-strict-aliasing -std=gnu++98 -fpermissive -Wall -Wextra -Wno-sign-compare -Wno-missing-field-initializers -DWIN32' \
     LDFLAGS='-static'
 
 # Cygwin creates hans.exe even though the Makefile target is named "hans".

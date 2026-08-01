@@ -12,7 +12,8 @@ Release 1.5 (August 2026)
 * Switch authenticated peer traffic inside the server without host iptables,
   and use LocalAppData for native Windows state
 * Restore encrypted data-plane performance with in-place AEAD, contiguous ACK
-  tracking, and single-threaded opportunistic Linux packet batching
+  tracking, optimized release builds, and single-threaded opportunistic Linux
+  packet batching
 
 Release 1.4 (July 2026)
 -----------------------

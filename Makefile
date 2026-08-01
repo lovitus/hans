@@ -1,6 +1,7 @@
 LDFLAGS = `sh osflags ld $(MODE)`
-CFLAGS = -c -g `sh osflags c $(MODE)`
-CPPFLAGS = -c -g -std=c++98 -pedantic -Wall -Wextra -Wno-sign-compare -Wno-missing-field-initializers `sh osflags c $(MODE)`
+OPTFLAGS ?= -O2 -fno-strict-aliasing
+CFLAGS = -c -g $(OPTFLAGS) `sh osflags c $(MODE)`
+CPPFLAGS = -c -g $(OPTFLAGS) -std=c++98 -pedantic -Wall -Wextra -Wno-sign-compare -Wno-missing-field-initializers `sh osflags c $(MODE)`
 TUN_DEV_FILE = `sh osflags dev $(MODE)`
 GCC = gcc
 GPP = g++
