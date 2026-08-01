@@ -212,18 +212,53 @@ s.shutdown(socket.SHUT_WR);print(s.recv(64).decode("ascii"));s.close()')
 ip netns exec "$client_ns" python3 "$(dirname "$BINABS")/test-socks5-udp.py" \
     127.0.0.1 18080 10.77.88.1 18083 hans userspace-secret
 
-# Exercise multiple simultaneous TCP PCBs and bridge buffers.
+# Exercise mixed traffic at the same time instead of testing each feature in
+# isolation: authenticated SOCKS, explicit sharing, allports fallback,
+# peer-to-peer sharing, and independent SOCKS5 UDP associations.
+mixed_pids=""
 for n in 1 2 3 4; do
     ip netns exec "$client_ns" curl --fail --silent --show-error --max-time 20 \
-        --socks5 127.0.0.1:18080 \
+        --socks5-hostname 127.0.0.1:18080 \
         --proxy-user hans:userspace-secret \
-        http://10.77.88.1:18080/$(basename "$BINABS") -o "$work/concurrent-$n" &
-    eval "curl_pid_$n=$!"
+        http://10.77.88.1:18080/$(basename "$BINABS") \
+        -o "$work/mixed-socks-$n" &
+    mixed_pids="$mixed_pids $!"
+
+    ip netns exec "$server_ns" curl --fail --silent --show-error --max-time 20 \
+        http://10.77.88.100:18082/$(basename "$BINABS") \
+        -o "$work/mixed-explicit-$n" &
+    mixed_pids="$mixed_pids $!"
+
+    ip netns exec "$server_ns" curl --fail --silent --show-error --max-time 20 \
+        http://10.77.88.100:18086/$(basename "$BINABS") \
+        -o "$work/mixed-allports-$n" &
+    mixed_pids="$mixed_pids $!"
+
+    ip netns exec "$client_ns" curl --fail --silent --show-error --max-time 20 \
+        --socks5-hostname 127.0.0.1:18080 \
+        --proxy-user hans:userspace-secret \
+        http://10.77.88.101:18085/$(basename "$BINABS") \
+        -o "$work/mixed-peer-$n" &
+    mixed_pids="$mixed_pids $!"
+
+    ip netns exec "$client_ns" python3 \
+        "$(dirname "$BINABS")/test-socks5-udp.py" \
+        127.0.0.1 18080 10.77.88.1 18083 hans userspace-secret \
+        >"$work/mixed-udp-$n.log" 2>&1 &
+    mixed_pids="$mixed_pids $!"
 done
+
+mixed_status=0
+for mixed_pid in $mixed_pids; do
+    wait "$mixed_pid" || mixed_status=1
+done
+[ "$mixed_status" -eq 0 ]
+
 for n in 1 2 3 4; do
-    eval "curl_pid=\$curl_pid_$n"
-    wait "$curl_pid"
-    cmp "$BINABS" "$work/concurrent-$n"
+    cmp "$BINABS" "$work/mixed-socks-$n"
+    cmp "$BINABS" "$work/mixed-explicit-$n"
+    cmp "$BINABS" "$work/mixed-allports-$n"
+    cmp "$BINABS" "$work/mixed-peer-$n"
 done
 
 kill -0 "$server_pid"
