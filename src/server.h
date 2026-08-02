@@ -41,7 +41,8 @@ public:
     Server(int tunnelMtu, const std::string *deviceName, const std::string &passphrase,
            uint32_t network, bool answerEcho, uid_t uid, gid_t gid, int pollTimeout,
            const std::string &leaseFile,
-           const std::string &identityFile = std::string());
+           const std::string &identityFile = std::string(),
+           bool requireV4 = false, bool requireV5 = false);
     virtual ~Server();
 
     static int listPeers(const std::string &leaseFile, bool json = false);
@@ -167,6 +168,16 @@ protected:
     void handleV4HandshakeFinish(const TunnelHeader &header, int dataLength,
                                  const Echo::Address &realAddress,
                                  uint16_t echoId, uint16_t echoSeq);
+    void handleV5HandshakeInit(const std::vector<uint8_t> &plain,
+                               const Echo::Address &realAddress,
+                               uint16_t echoId, uint16_t echoSeq);
+    void handleV5HandshakeFinish(const std::vector<uint8_t> &plain,
+                                 const Echo::Address &realAddress,
+                                 uint16_t echoId, uint16_t echoSeq);
+    void completeSecureHandshake(ClientData *client,
+                                 const std::vector<uint8_t> &decoded,
+                                 const Echo::Address &realAddress,
+                                 uint16_t echoId, uint16_t echoSeq);
     void removeClient(ClientData *client);
 
     void sendChallenge(ClientData *client);
@@ -188,9 +199,18 @@ protected:
                               TransportV3::Header &transport);
     bool openV4Packet(ClientData *client, const TunnelHeader &header,
                       int &dataLength, const Echo::Address &realAddress);
+    bool openV5Packet(ClientData *client, TunnelHeader::Type &type,
+                      int &dataLength, const Echo::Address &realAddress);
     void sendV4RawToClient(ClientData *client, TunnelHeader::Type type,
                            const char *data, int dataLength,
                            uint16_t echoId, uint16_t echoSeq);
+    void sendV5RawToClient(ClientData *client, TunnelHeader::Type type,
+                           const char *data, int dataLength,
+                           uint16_t echoId, uint16_t echoSeq);
+    bool handleSecureClientPacket(ClientData *client,
+                                  TunnelHeader::Type type, int dataLength,
+                                  const Echo::Address &realAddress,
+                                  uint16_t id, uint16_t seq);
     void processTransportAck(ClientData *client,
                              const TransportV3::Header &transport);
     bool directPathFailed(ClientData *client) const;
@@ -227,6 +247,9 @@ protected:
     ClientIpMap clientReceiverIndexMap;
     SecureIdentity secureIdentity;
     uint8_t securePsk[32];
+    uint8_t handshakeKeyV5[32];
+    bool requireV4;
+    bool requireV5;
     KernelEchoGuard kernelEchoGuard;
     KernelEchoGuard kernelEchoGuard6;
 };

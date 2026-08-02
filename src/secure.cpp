@@ -735,6 +735,51 @@ bool ReplayWindow64::canAccept(uint64_t counter) const
     return distance < 64 && (received & ((uint64_t)1 << distance)) == 0;
 }
 
+void HandshakeEnvelopeV5::deriveKey(const uint8_t psk[32], uint8_t key[32])
+{
+    static const uint8_t label[] =
+        "Hans protocol v5 pre-authenticated handshake envelope";
+    crypto_blake2b_keyed(key, 32, psk, 32, label, sizeof(label) - 1);
+}
+
+bool HandshakeEnvelopeV5::seal(const uint8_t key[32], const uint8_t *plain,
+                               size_t plainLength,
+                               std::vector<uint8_t> &packet)
+{
+    packet.resize(OVERHEAD + plainLength);
+    Utility::secureRandom(&packet[0], NONCE_SIZE);
+    uint8_t *cipher = &packet[NONCE_SIZE];
+    uint8_t *tag = cipher + plainLength;
+    static const uint8_t ad[] = "Hans protocol v5 handshake";
+    crypto_aead_lock(cipher, tag, key, &packet[0], ad, sizeof(ad) - 1,
+                     plain, plainLength);
+    return true;
+}
+
+bool HandshakeEnvelopeV5::open(const uint8_t key[32], const uint8_t *packet,
+                               size_t packetLength,
+                               std::vector<uint8_t> &plain)
+{
+    plain.clear();
+    if (packet == NULL || packetLength < OVERHEAD)
+        return false;
+    size_t plainLength = packetLength - OVERHEAD;
+    plain.resize(plainLength);
+    const uint8_t *cipher = packet + NONCE_SIZE;
+    const uint8_t *tag = cipher + plainLength;
+    static const uint8_t ad[] = "Hans protocol v5 handshake";
+    if (crypto_aead_unlock(plainLength == 0 ? NULL : &plain[0], tag, key,
+                           packet, ad, sizeof(ad) - 1,
+                           cipher, plainLength) != 0)
+    {
+        if (!plain.empty())
+            crypto_wipe(&plain[0], plain.size());
+        plain.clear();
+        return false;
+    }
+    return true;
+}
+
 void ReplayWindow64::accept(uint64_t counter)
 {
     if (!initialized)

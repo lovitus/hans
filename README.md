@@ -14,24 +14,24 @@ deployment, compatibility, and peer-management features:
 
 | Feature | What this fork adds |
 | --- | --- |
-| Authenticated encrypted transport | Protocol v4 uses `Noise_XXpsk3_25519_ChaChaPoly_BLAKE2b`, with an Argon2id-derived PSK, per-installation X25519 identity keys, ChaCha20-Poly1305 packet protection, and a 64-packet replay window. All upgrades remain inside ICMP; Hans never changes to direct TCP or UDP. |
-| Persistent peer identity | A v4 client's stable 128-bit ID is the BLAKE2b fingerprint of its authenticated Noise public key. It is independent of IP address, adapter, and disk serial number, and cannot be claimed without the private key. Legacy v2/v3 peers retain their random device IDs. |
+| Authenticated encrypted transport | Protocol v5 wraps every Noise handshake message in randomized XChaCha20-Poly1305 and encrypts the established message type plus the complete adaptive-transport header. It retains v4's `Noise_XXpsk3_25519_ChaChaPoly_BLAKE2b`, Argon2id-derived PSK, per-installation X25519 identity, directional ChaCha20-Poly1305 keys, and replay window. All upgrades remain inside ICMP; Hans never changes to direct TCP or UDP. |
+| Persistent peer identity | A v4/v5 client's stable 128-bit ID is the BLAKE2b fingerprint of its authenticated Noise public key. It is independent of IP address, adapter, and disk serial number, and cannot be claimed without the private key. Legacy v2/v3 peers retain their random device IDs. |
 | Sticky tunnel addresses | The server remembers device-to-IP leases across reconnects and server restarts, so clients normally keep the same tunnel address without configuring `-a`. |
 | Lease retention | Offline leases are retained while unused addresses remain. When the pool is full, only the least-recently-seen offline lease is reclaimed; active peers are never evicted. |
-| Peer inspection | `hans --list-peers` shows device ID, tunnel IP, real IP, online/offline state, and last-seen time; `--json` provides stable machine-readable output. `hans --show-identity` displays the v4 public fingerprint. |
+| Peer inspection | `hans --list-peers` shows device ID, tunnel IP, real IP, online/offline state, and last-seen time; `--json` provides stable machine-readable output. `hans --show-identity` displays the secure public fingerprint. |
 | Adaptive transport | Protocol v3 starts with conservative echo-request credits, measures reply RTT and server backlog, and adjusts the credit count instead of requiring a guessed `-w` window. Current peers use ordinary sequential ICMP echo tokens and briefly reorder only inner data that demonstrably arrived out of order. |
-| Adaptive timing and MTU | Retransmission timeout follows RFC 6298-style smoothed RTT/variance with bounded exponential backoff. v4 peers negotiate the smaller configured inner MTU and lower the server interface conservatively, so differently configured peers do not silently overrun one another. |
-| Direct-reply upgrade and fallback | A client probes whether the path safely passes multiple replies for one echo request. A successful path upgrades to direct replies; sequence/ACK tracking and heartbeats automatically return it to adaptive credits if that path stops working, then probe it again after a quiet interval. Authenticated v4 heartbeats also recover a session forgotten after a server restart without requiring an unauthenticated RESET. |
-| Low-risk data fast path | Release builds enable conservative `-O2` optimization. Linux keeps the single-threaded packet/state owner but uses opportunistic `recvmmsg`/`sendmmsg` batches, bounded TUN queue draining, in-place v4 AEAD, and preallocated contiguous direct-ACK tracking. Packets are never coalesced, batching never waits to fill, and unsupported kernels automatically retain the portable one-packet syscall path. |
+| Adaptive timing and MTU | Retransmission timeout follows RFC 6298-style smoothed RTT/variance with bounded exponential backoff. v4/v5 peers negotiate the smaller configured inner MTU and lower the server interface conservatively, so differently configured peers do not silently overrun one another. |
+| Direct-reply upgrade and fallback | A client probes whether the path safely passes multiple replies for one echo request. A successful path upgrades to direct replies; sequence/ACK tracking and heartbeats automatically return it to adaptive credits if that path stops working, then probe it again after a quiet interval. Authenticated v4/v5 heartbeats also recover a session forgotten after a server restart without requiring an unauthenticated RESET. |
+| Low-risk data fast path | Release builds enable conservative `-O2` optimization. Linux keeps the single-threaded packet/state owner but uses opportunistic `recvmmsg`/`sendmmsg` batches, bounded TUN queue draining, in-place AEAD, and preallocated contiguous direct-ACK tracking. Packets are never coalesced, batching never waits to fill, and unsupported kernels automatically retain the portable one-packet syscall path. |
 | Adapter-free userspace client | `--feature userspace` replaces TUN/TAP with a statically embedded lwIP stack. It exposes SOCKS5 TCP/UDP access, explicit inbound mappings, or an opt-in all-TCP-port loopback fallback while preserving the client's sticky VPN identity and tunnel IP. The normal kernel-interface path is unchanged unless this feature is explicitly selected. |
-| Backward-compatible protocol | New servers still accept v1/v2/v3 clients. New clients try encrypted v4 first, then fall back for older servers unless `--require-v4` is set. `--server-fingerprint` pins the expected server key and prevents impersonation by another member of the same PSK group. |
+| Backward-compatible protocol | New servers still accept v1-v4 clients. New clients try fully wrapped v5 first, then fall back for older servers. On either endpoint, `--require-v5` accepts only v5, while `--require-v4` permits v4/v5 but silently rejects unencrypted v1-v3 on a server. `--server-fingerprint` pins the expected server key and implicitly refuses v1-v3. |
 | Broad release matrix | GitHub Actions builds Linux, macOS, Windows/Cygwin (amd64 and legacy i386), FreeBSD, OpenBSD, and NetBSD binaries for the CPU architectures supported by the codebase. |
 | Static releases | Linux and BSD release binaries are fully static. Windows compiler/C++ runtimes are embedded in the executable; macOS uses only operating-system libraries. Release binaries are stripped before their isolated package tests to avoid shipping debug symbols. |
 | Old-Linux support | Statically linked musl binaries avoid glibc version dependencies and run on systems such as CentOS 7, older distributions, embedded Linux, and Alpine. |
 | Adapter fallback | Windows prefers an installed TAP-Windows adapter and automatically falls back to bundled Wintun. Linux prefers TUN and falls back to a veth pair plus `AF_PACKET` when TUN is unavailable. Auto-created interfaces use `hans1`, then `hans2`, and so on. |
 | Safe orphan cleanup | Auto-created Linux veth pairs carry a random ownership marker. On startup Hans removes a pair only when both endpoints and markers match exactly and no live process still owns it; ambiguous interfaces are always retained. |
 | Runtime packaging | Windows compiler and C++ runtimes are linked into `hans.exe`; the package includes the unavoidable `cygwin1.dll` and the signed official `wintun.dll`, allowing use without a separate Cygwin installation. |
-| Automated validation | Every build runs Noise handshake/AEAD/replay and complete v4 framing tests, deterministic parser fuzzing, transport codec, sequence/ACK, adaptive RTO/window, userspace, identity, and lease tests. The main Linux job repeats them under ASan/UBSan. The stripped package is then tested from an isolated product directory after its build environment is removed. Privileged Linux CI verifies negotiated MTU, direct mode, bidirectional TCP, forced-path fallback/recovery and re-upgrade, plus automatic v4 recovery after the server forgets the encrypted session. Another test runs two same-NAT stripped clients unprivileged without TUN and exercises authenticated SOCKS5 TCP/UDP, both explicit mapping forms, allports fallback, and explicit-over-fallback precedence. |
+| Automated validation | Every build runs Noise handshake/AEAD/replay and complete v4/v5 framing tests, deterministic parser fuzzing, transport codec, sequence/ACK, adaptive RTO/window, userspace, identity, and lease tests. The main Linux job repeats them under ASan/UBSan. The stripped package is then tested from an isolated product directory after its build environment is removed. Privileged Linux CI verifies v5-only wrong-key silence, absence of legacy wire magic, negotiated MTU, direct mode, bidirectional TCP, forced-path fallback/recovery and re-upgrade, plus automatic secure-session recovery after server restart. Another test runs two same-NAT stripped clients unprivileged without TUN and exercises authenticated SOCKS5 TCP/UDP, both explicit mapping forms, allports fallback, and explicit-over-fallback precedence. |
 | Continuous releases | Successful builds are collected and published automatically on the [Releases page](../../releases). |
 
 ## How it works
@@ -41,14 +41,19 @@ deployment, compatibility, and peer-management features:
   `network + 100`, `network + 101`, ... to connecting clients.
 - A current **client** and server perform a three-message Noise XXpsk3
   handshake entirely inside ICMP. The passphrase is hardened once with
-  Argon2id; ephemeral/static X25519 keys authenticate the peers and derive
-  directional ChaCha20-Poly1305 keys. Header type, receiver index, counter,
-  and payload are authenticated, and replayed packets are discarded.
+  Argon2id; a derived key wraps every v5 handshake message in a fresh random
+  XChaCha20-Poly1305 envelope before any server session state is allocated.
+  Ephemeral/static X25519 keys authenticate the peers and derive directional
+  ChaCha20-Poly1305 keys. Established v5 packets encrypt the message type,
+  adaptive-transport header, and payload. Only a pseudorandom per-session
+  receiver index and monotonic AEAD counter remain visible because the server
+  needs them to select a key and construct the nonce; no fixed Hans magic or
+  plaintext protocol type is present. Replayed packets are discarded.
 - The authenticated client public-key fingerprint owns the sticky lease.
   Receiver indexes, rather than source addresses, distinguish encrypted peers,
   so several clients behind one NAT can coexist. A source-address change is
   adopted only after a packet passes AEAD verification.
-- A protocol-v4 client also accepts an initial Noise response from a different
+- A protocol-v4/v5 client also accepts an initial Noise response from a different
   server source address, which Linux raw ICMPv6 may select on multi-address
   interfaces. The new address is adopted only after the PSK, server static key,
   and optional fingerprint pin have authenticated the response; legacy
@@ -58,7 +63,7 @@ deployment, compatibility, and peer-management features:
   emitted with that IP, and packets arriving at shared VPN ports are terminated
   by lwIP and bridged to local host sockets. Server and peer protocol behavior
   is identical to a normal client.
-- The v4 encrypted payload carries the existing v3 adaptive transport. It does
+- The v4/v5 encrypted payload carries the existing v3 adaptive transport. It does
   not use a fixed receive window by default. It begins with a
   small set of echo-request credits and grows or shrinks that set using measured
   RTT and queued work. It also probes for safe multi-reply delivery and uses
@@ -67,7 +72,7 @@ deployment, compatibility, and peer-management features:
   conservative credit-mode fallback, with a later probe to recover direct mode.
   Credit mode also sends a low-rate authenticated heartbeat. If no authenticated
   server packet arrives for 20 seconds, the client waits up to two seconds of
-  random jitter and starts a fresh v4 handshake. This repairs sessions lost to
+  random jitter and starts a fresh secure handshake. This repairs sessions lost to
   a server restart or server-side expiry while the server continues to silently
   discard unknown receiver indexes instead of exposing an unauthenticated reset
   response. Ordinary short path interruptions retain the existing session.
@@ -84,8 +89,17 @@ deployment, compatibility, and peer-management features:
   behavior). **Client mode** works on Linux, FreeBSD, OpenBSD, NetBSD, macOS
   and Windows (via Cygwin).
 - Legacy v1-v3 sessions use their original SHA1 challenge and are not
-  encrypted. Use `--require-v4` when downgrade compatibility is not wanted.
-  `--server-fingerprint` additionally pins the server's v4 public key.
+  encrypted. Use `--require-v4` to allow v4 but refuse those legacy versions,
+  or `--require-v5` on both ends to require the fully wrapped wire format.
+  `--server-fingerprint` pins the server public key and implicitly refuses
+  unencrypted fallback.
+
+Protocol v5 removes Hans-specific plaintext signatures; it is not a general
+traffic-obfuscation layer. An observer can still see ICMP echo traffic, packet
+lengths, direction, volume, and timing, and can use those statistical features
+for classification. `--require-v5` prevents protocol downgrade but does not
+make sustained high-volume ICMP indistinguishable from ordinary interactive
+ping traffic.
 
 ## Downloads
 
@@ -445,14 +459,15 @@ Use custom state paths when packaging Hans or running more than one instance:
 ```
 
 `--device-id` and `--device-id-file` remain for legacy v2/v3 compatibility.
-They cannot override an encrypted v4 identity: v4 lease ownership always comes
+They cannot override an encrypted v4/v5 identity: secure lease ownership always comes
 from proof of possession of the Noise private key. Use `--identity-file` to
 choose or restore that key.
 
 Servers accept legacy clients without a device ID (those clients continue to
-receive non-sticky leases). New clients negotiate v4 first and automatically
-fall back through v3/v2/v1 for older servers. Add `--require-v4` to refuse this
-compatibility downgrade.
+receive non-sticky leases). New clients negotiate v5 first and automatically
+fall back through v4/v3/v2/v1 for older servers. Add `--require-v5` to refuse
+all fallback, or `--require-v4` to retain v4 compatibility while refusing
+unencrypted v1-v3.
 
 ## Make the server also answer normal pings
 
@@ -467,11 +482,11 @@ sudo ./hans -s 10.0.0.0 -p secret -r
 
 | Flag | Purpose |
 | --- | --- |
-| `-m mtu` | Reference MTU of the path (default `1500`). v4 negotiates the smaller configured inner MTU; lower it for constrained links. Legacy versions still require matching values. |
+| `-m mtu` | Reference MTU of the path (default `1500`). v4/v5 negotiate the smaller configured inner MTU; lower it for constrained links. Legacy versions still require matching values. |
 | `-w auto` | Default. Negotiate v3 adaptive credits, probe direct replies, automatically downgrade on failure, and retry the direct path later. Usually no tuning is needed. |
 | `-w polls` | Force the old fixed credit count for diagnostics or a known path. `0` forces direct replies and intentionally disables automatic fallback; prefer `auto` for normal use. |
 | `-i` | Change the ICMP echo **id** on every request (client only). Helps with routers/firewalls that get confused by a static id. |
-| `-q` | Use non-sequential ICMP echo **sequence numbers** (client only). Current v3/v4 sessions otherwise advance the normal sequence by one and carry into the echo ID on wrap. Use this only for diagnosing a middlebox that mishandles the ordinary form. |
+| `-q` | Use non-sequential ICMP echo **sequence numbers** (client only). Current v3/v4/v5 sessions otherwise advance the normal sequence by one and carry into the echo ID on wrap. Use this only for diagnosing a middlebox that mishandles the ordinary form. |
 | `-d device` | Force a specific virtual interface name instead of auto-selecting `hans1`, `hans2`, and so on. |
 
 With `-v`, transport anomaly summaries report accepted packets, forward gaps,
@@ -508,6 +523,7 @@ RUN AS CLIENT (TUN/TAP, DEFAULT)
        [-m reference_mtu] [-w auto|polls] [--device-id id]
        [--device-id-file path]
        [--identity-file path] [--server-fingerprint hex] [--require-v4]
+       [--require-v5]
 
 RUN AS USERSPACE CLIENT (NO TUN/TAP)
   hans -c server [-fv] [-p passphrase] [-u user]
@@ -516,10 +532,11 @@ RUN AS USERSPACE CLIENT (NO TUN/TAP)
        [--socks5 IPv4:port] [--shareports mappings] [--allports]
        [--socks5-user name] [--socks5-password-file path]
        [--identity-file path] [--server-fingerprint hex] [--require-v4]
+       [--require-v5]
 
 RUN AS SERVER (linux only)
   hans -s network [-fvr] [-p passphrase] [-u user] [-d tun_device]
-       [-m reference_mtu] [--lease-file path]
+       [-m reference_mtu] [--lease-file path] [--require-v4|--require-v5]
 
 LIST SERVER PEERS
   hans --list-peers [--lease-file path] [--json]
@@ -572,8 +589,11 @@ SECURE TRANSPORT OPTIONS
   --passphrase-file path
                 Read the tunnel passphrase from a private 0600 file.
   --server-fingerprint hex
-                Pin the expected server Noise fingerprint.
-  --require-v4  Refuse fallback to an unencrypted legacy protocol.
+                Pin the expected server Noise fingerprint and implicitly
+                refuse unencrypted v1-v3 fallback.
+  --require-v4  Client/server: require encrypted protocol v4 or newer.
+  --require-v5  Client: refuse fallback from fully wrapped protocol v5.
+                Server: silently accept protocol v5 only.
   -h, --help    Show this help and exit.
   --json        Emit JSON for --list-peers or --doctor.
   --doctor      Check secure randomness and ICMP transport access.

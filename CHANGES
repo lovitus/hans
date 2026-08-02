@@ -1,19 +1,21 @@
-Release 1.5 (August 2026)
--------------------------
-* Add encrypted protocol v4 with Noise XXpsk3, Argon2id, X25519,
-  ChaCha20-Poly1305, receiver indexes, and replay protection
-* Bind sticky peer identity to the authenticated Noise public key
-* Add server-key pinning, optional downgrade refusal, and identity inspection
-* Add RFC 1929 SOCKS5 authentication with a private password file
-* Add JSON peer listing and portable ICMP/entropy diagnostics
-* Add complete v4 framing, tamper, wrong-PSK, replay, and package tests
-* Add IPv6 server-name/literal resolution and ICMPv6 as an outer carrier;
-  the virtual VPN network remains IPv4, and service both ICMP families fairly
-  when unrelated public echo traffic keeps one raw socket continuously busy;
-  securely follow an authenticated raw-ICMPv6 reply sourced from another
-  address on a multi-address server
-* Switch authenticated peer traffic inside the server without host iptables,
-  and use LocalAppData for native Windows state
+Release 1.6.0 (August 2026)
+---------------------------
+* Add protocol v5, which pre-authenticates every Noise handshake message with
+  a randomized XChaCha20-Poly1305 envelope and encrypts the established
+  message type and complete adaptive-transport header; the wire retains only
+  the per-session receiver index and replay counter needed for demultiplexing
+  and AEAD nonce construction, with no fixed Hans magic value
+* Make clients try v5 first while retaining automatic v4/v3/v2/v1 fallback;
+  allow servers to use `--require-v4` to reject unencrypted v1-v3, and add
+  `--require-v5` for clients that refuse downgrade and servers that silently
+  ignore every earlier protocol before allocating handshake state
+* Make a pinned server fingerprint implicitly refuse unencrypted v1-v3
+  fallback, so compatibility negotiation cannot discard the pin
+* Extend protocol, wrong-key, tamper, replay, package-isolation, userspace,
+  IPv6, direct-mode, bidirectional TCP, and server-restart recovery tests to v5
+
+Release 1.5.1 (August 2026)
+---------------------------
 * Restore encrypted data-plane performance with in-place AEAD, contiguous ACK
   tracking, optimized release builds, and single-threaded opportunistic Linux
   packet batching
@@ -22,42 +24,68 @@ Release 1.5 (August 2026)
   throughput at one small window per round trip
 * Improve userspace TCP loss recovery with a finer lwIP timer while retaining
   a conservative 400 ms retransmission floor for jittery Internet paths
+* Add opt-in all-TCP-port userspace sharing with explicit mappings taking
+  precedence, and harden listener failure and bridge teardown paths
 * Use conventional sequential ICMP echo tokens for current sessions, add
   per-peer gap/late/duplicate telemetry, and briefly reorder only inner data
   after a late packet proves the path reorders; loss-only and normal paths
   remain zero-copy and do not incur reorder delay
+* Fairly service IPv4 and IPv6 ICMP when unrelated echo traffic keeps one raw
+  socket busy, and securely follow authenticated ICMPv6 replies sourced from
+  another address on a multi-address server
 * Recover encrypted v4 clients after a server restart or expired server-side
   session using authenticated ICMP heartbeats and a jittered client-initiated
   handshake; unknown receiver indexes remain silent and expose no reset oracle
+* Expand sanitizer, mixed userspace concurrency, lossy SOCKS UDP, portability,
+  package-isolation, and real transport recovery coverage
 
-Release 1.4 (July 2026)
------------------------
+Release 1.5.0 (August 2026)
+---------------------------
+* Add encrypted protocol v4 with Noise XXpsk3, Argon2id, X25519,
+  ChaCha20-Poly1305, receiver indexes, and replay protection
+* Bind sticky peer identity to the authenticated Noise public key
+* Add server-key pinning, optional downgrade refusal, and identity inspection
+* Add RFC 1929 SOCKS5 authentication with a private password file
+* Add JSON peer listing and portable ICMP/entropy diagnostics
+* Add complete v4 framing, tamper, wrong-PSK, replay, and package tests
+* Add IPv6 server-name/literal resolution and ICMPv6 as an outer carrier;
+  the virtual VPN network remains IPv4
+* Switch authenticated peer traffic inside the server without host iptables,
+  and use LocalAppData for native Windows state
+* Restrict Linux kernel echo suppression to active peers and protect native
+  Windows identity keys with owner-only ACLs before writing them
+
+Release 1.4.0 (July 2026)
+-------------------------
 * Add an optional adapter-free userspace client using statically embedded lwIP
 * Add SOCKS5 TCP CONNECT and UDP ASSOCIATE access to every VPN peer
 * Add inbound VPN port sharing with loopback-by-default and explicit target maps
-* Add opt-in all-TCP-port sharing with explicit mappings taking precedence
 * Add unprivileged ping-socket support on POSIX systems and Windows IP Helper transport
 * Add isolated-package userspace integration tests without TUN or build dependencies
 
-Release 1.3 (July 2026)
------------------------
+Release 1.3.0 (July 2026)
+-------------------------
 * Add protocol v3 with session-scoped sequence numbers and rolling ACKs
 * Replace the default fixed poll window with adaptive request credits
 * Probe and use direct echo replies, with automatic fallback and re-upgrade
 * Add transport unit tests and privileged failure/recovery CI coverage
 
-Release 1.2 (July 2026)
------------------------
+Release 1.2.0 (July 2026)
+-------------------------
 * Add persistent random client device identities
 * Add server-side sticky leases with least-recently-seen offline eviction
 * Add peer listing, device-id inspection, and protocol fallback for old servers
+* Add Wintun and Linux veth adapter fallbacks with safe orphan cleanup and
+  veth offload handling
+* Publish stripped, isolated-package builds across Linux, BSD, macOS, and
+  Windows, including static musl and legacy Windows i386 packages
 
-Release 1.1 (November 2022)
----------------------------
+Release 1.1.0 (November 2022)
+-----------------------------
 * Switch to utun devices on macOS (thanks to unkernet)
 
-Release 1.0 (November 2016)
----------------------------
+Release 1.0.0 (November 2016)
+-----------------------------
 * Added cygwin support
 * Remove supplementary groups when dropping privileges
 * Fixed compile error on FreeBSD

@@ -82,6 +82,14 @@ void Worker::sendEcho(const TunnelHeader::Magic &magic, TunnelHeader::Type type,
     echo.send(length + sizeof(TunnelHeader), realAddress, reply, id, seq);
 }
 
+void Worker::sendRawEcho(int length, const Echo::Address &realAddress,
+                         bool reply, uint16_t id, uint16_t seq)
+{
+    if (length < 0 || length > rawPayloadBufferSize())
+        throw Exception("packet too big");
+    echo.send(length, realAddress, reply, id, seq);
+}
+
 void Worker::sendToTun(int length)
 {
     tun.write(echoReceivePayloadBuffer(), length);
@@ -286,7 +294,17 @@ char *Worker::echoSendPayloadBuffer()
     return echo.sendPayloadBuffer() + sizeof(TunnelHeader);
 }
 
+char *Worker::rawEchoSendPayloadBuffer()
+{
+    return echo.sendPayloadBuffer();
+}
+
 char *Worker::echoReceivePayloadBuffer()
 {
     return echo.receivePayloadBuffer() + sizeof(TunnelHeader);
+}
+
+char *Worker::rawEchoReceivePayloadBuffer()
+{
+    return echo.receivePayloadBuffer();
 }

@@ -169,7 +169,7 @@ jobs:
             bash -c '
               set -eu
               apt-get update -qq
-              DEBIAN_FRONTEND=noninteractive apt-get install -y -qq iproute2 iperf3 iputils-ping net-tools
+              DEBIAN_FRONTEND=noninteractive apt-get install -y -qq iproute2 iperf3 iputils-ping net-tools python3 tcpdump
               mkdir -p /dev/net
               if [ ! -c /dev/net/tun ]; then
                 mknod /dev/net/tun c 10 200
@@ -177,7 +177,7 @@ jobs:
               chmod 666 /dev/net/tun
 
               cleanup() {
-                kill "${traffic_pid:-}" "${client_pid:-}" "${server_pid:-}" 2>/dev/null || true
+                kill "${traffic_pid:-}" "${capture_pid:-}" "${client_pid:-}" "${server_pid:-}" 2>/dev/null || true
                 ip netns delete hans-client 2>/dev/null || true
                 ip netns delete hans-server 2>/dev/null || true
               }
@@ -221,12 +221,70 @@ jobs:
               ip -n hans-client link set under-client up
               ip netns exec hans-server tc qdisc add dev under-server root netem delay 20ms
 
+              # Server-side --require-v4 accepts v4/v5 but must silently drop
+              # an unencrypted v2 request. Ignore the ordinary kernel echo of
+              # the request and fail only if a Hans v2 challenge appears.
               ip netns exec hans-server /product/hans \
-                -s 10.66.77.0 -p hans-transport-ci -f -v >/tmp/hans-server.log 2>&1 &
+                -s 10.66.76.0 -p hans-policy-ci --require-v4 -f -v >/tmp/hans-policy-server.log 2>&1 &
               server_pid=$!
               sleep 1
+              ip netns exec hans-client python3 - <<PY
+          import socket, struct, time
+          def checksum(data):
+              if len(data) & 1:
+                  data += b"\0"
+              words = struct.unpack("!%dH" % (len(data) // 2), data)
+              total = sum(words)
+              total = (total & 0xffff) + (total >> 16)
+              total = (total & 0xffff) + (total >> 16)
+              return (~total) & 0xffff
+          payload = b"hnc2" + bytes([2]) + bytes(40)
+          header = struct.pack("!BBHHH", 8, 0, 0, 0x4861, 1)
+          packet = header[:2] + struct.pack("!H", checksum(header + payload)) + header[4:] + payload
+          sock = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_ICMP)
+          sock.settimeout(0.25)
+          sock.sendto(packet, ("192.0.2.1", 0))
+          deadline = time.time() + 2
+          while time.time() < deadline:
+              try:
+                  received = sock.recv(4096)
+              except socket.timeout:
+                  continue
+              ihl = (received[0] & 15) * 4
+              answer = received[ihl + 8:]
+              if answer.startswith(b"hns2" + bytes([3])):
+                  raise SystemExit("require-v4 server answered a legacy request")
+          PY
+              grep -q "accepting secure protocol v4 or newer only" /tmp/hans-policy-server.log
+              kill "$server_pid"
+              wait "$server_pid" 2>/dev/null || true
+              server_pid=
+
+              ip netns exec hans-server /product/hans \
+                -s 10.66.77.0 -p hans-transport-ci --require-v5 -f -v >/tmp/hans-server.log 2>&1 &
+              server_pid=$!
+              sleep 1
+
+              # A wrong passphrase must not allocate a pending server session
+              # or elicit a Hans protocol response. Ordinary kernel echo
+              # replies can still exist and are deliberately ignored by v5.
+              if ip netns exec hans-client /product/hans \
+                -c 192.0.2.1 -p wrong-hans-transport-ci --require-v5 -f -v \
+                >/tmp/hans-wrong-key.log 2>&1; then
+                echo "wrong-key v5 client unexpectedly connected" >&2
+                exit 1
+              fi
+              grep -q "secure protocol v5 handshake timed out" /tmp/hans-wrong-key.log
+              ! grep -q "secure protocol v5 connection established" /tmp/hans-server.log
+
+              # Capture only the negotiation, before bulk traffic makes a
+              # ciphertext substring assertion unnecessarily probabilistic.
+              ip netns exec hans-server tcpdump -U -i under-server -w /tmp/hans-v5-handshake.pcap icmp \
+                >/tmp/hans-tcpdump.log 2>&1 &
+              capture_pid=$!
+              sleep 0.5
               ip netns exec hans-client /product/hans \
-                -c 192.0.2.1 -p hans-transport-ci -m 1400 -f -v >/tmp/hans-client.log 2>&1 &
+                -c 192.0.2.1 -p hans-transport-ci --require-v5 -m 1400 -f -v >/tmp/hans-client.log 2>&1 &
               client_pid=$!
 
               connected=0
@@ -241,6 +299,14 @@ jobs:
                 cat /tmp/hans-server.log /tmp/hans-client.log
                 exit 1
               fi
+              kill "$capture_pid"
+              wait "$capture_pid" 2>/dev/null || true
+              capture_pid=
+              [ -s /tmp/hans-v5-handshake.pcap ]
+              ! grep -aEq "hanc|hans|hnc2|hns2|hnc3|hns3|hnc4|hns4" \
+                /tmp/hans-v5-handshake.pcap
+              grep -q "sending protocol v5 connection request" /tmp/hans-client.log
+              grep -q "secure protocol v5 connection established" /tmp/hans-server.log
 
               # Auto mode must discover that this path accepts multiple echo
               # replies and upgrade without a user-specified poll window.
@@ -317,7 +383,7 @@ jobs:
               kill "$client_pid"
               wait "$client_pid" 2>/dev/null || true
               ip netns exec hans-client /product/hans \
-                -c 192.0.2.1 -p hans-transport-ci -m 1400 -w 0 -f -v >>/tmp/hans-client.log 2>&1 &
+                -c 192.0.2.1 -p hans-transport-ci --require-v5 -m 1400 -w 0 -f -v >>/tmp/hans-client.log 2>&1 &
               client_pid=$!
               reconnected=0
               for attempt in $(seq 1 40); do
@@ -333,17 +399,17 @@ jobs:
               [ "$reconnected" -eq 1 ]
               ip netns exec hans-client ping -c 3 -W 2 10.66.77.1
 
-              # Keep sending TUN traffic across the fixed-direct v4 session
+              # Keep sending TUN traffic across the fixed-direct v5 session
               # while the server disappears. Before the v4 timer fix every
               # send reset the clients next timeout to the legacy 60-second
               # keepalive, so this traffic prevented the 20-second watchdog
               # from reconnecting within the test window.
               #
-              # A v4 server cannot safely send an unauthenticated RESET for
+              # A secure server cannot safely send an unauthenticated RESET for
               # an unknown receiver index. Restart it after the traffic ends
               # and require the authenticated heartbeat watchdog to initiate
               # a fresh handshake without exposing a reset oracle.
-              ! grep -q "reconnecting expired protocol v4 session" /tmp/hans-client.log
+              ! grep -q "reconnecting expired secure protocol v5 session" /tmp/hans-client.log
               connections_before=$(grep -c "connection established" /tmp/hans-client.log || true)
               ip netns exec hans-client ping -i 0.05 -w 4 10.66.77.1 >/tmp/hans-heartbeat-traffic.log 2>&1 &
               traffic_pid=$!
@@ -354,13 +420,13 @@ jobs:
               wait "$traffic_pid" 2>/dev/null || true
               traffic_pid=
               ip netns exec hans-server /product/hans \
-                -s 10.66.77.0 -p hans-transport-ci -f -v >>/tmp/hans-server.log 2>&1 &
+                -s 10.66.77.0 -p hans-transport-ci --require-v5 -f -v >>/tmp/hans-server.log 2>&1 &
               server_pid=$!
 
               session_recovered=0
               for attempt in $(seq 1 100); do
                 connections_now=$(grep -c "connection established" /tmp/hans-client.log || true)
-                if grep -q "reconnecting expired protocol v4 session" /tmp/hans-client.log &&
+                if grep -q "reconnecting expired secure protocol v5 session" /tmp/hans-client.log &&
                    [ "$connections_now" -gt "$connections_before" ]; then
                   session_recovered=1
                   break
@@ -1063,6 +1129,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
@@ -1103,18 +1171,75 @@ jobs:
           GIT_REF: ${{ github.ref }}
         run: |
           if [[ "$GIT_REF" == refs/tags/* ]]; then
+            tag="${GIT_REF#refs/tags/}"
+            if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?$ ]]; then
+              echo "formal release tags must use SemVer, for example v1.5.1 or v1.6.0-rc.1" >&2
+              exit 1
+            fi
+            version="${tag#v}"
+            source_version="${version%%-*}"
+            grep -Fq "Hans - IP over ICMP version $source_version" src/main.cpp
+            grep -Fq "Release $source_version (" CHANGES
+            prerelease=false
+            [[ "$version" == *-* ]] && prerelease=true
             {
-              echo "tag=${GIT_REF#refs/tags/}"
-              echo "prerelease=false"
-              echo "name=hans ${GIT_REF#refs/tags/}"
+              echo "tag=$tag"
+              echo "version=$source_version"
+              echo "prerelease=$prerelease"
+              echo "name=Hans $tag"
             } >> "$GITHUB_OUTPUT"
           else
             {
               echo "tag=latest"
+              echo "version="
               echo "prerelease=true"
-              echo "name=Continuous build (${GITHUB_SHA::7})"
+              echo "name=Hans continuous build (${GITHUB_SHA::7})"
             } >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Build release notes
+        env:
+          RELEASE_TAG: ${{ steps.tag.outputs.tag }}
+          RELEASE_VERSION: ${{ steps.tag.outputs.version }}
+        run: |
+          if [[ -n "$RELEASE_VERSION" ]]; then
+            {
+              echo "## Highlights"
+              echo
+              awk -v prefix="Release $RELEASE_VERSION (" '
+                /^Release / {
+                  if (found) exit
+                  if (index($0, prefix) == 1) {
+                    found = 1
+                    next
+                  }
+                }
+                found && /^-+$/ { next }
+                found { print }
+                END { if (!found) exit 2 }
+              ' CHANGES
+
+              previous_tag=$(git tag --merged HEAD --list 'v[0-9]*.[0-9]*.[0-9]*' \
+                --sort=-version:refname | grep -Fvx "$RELEASE_TAG" | head -1 || true)
+              echo
+              echo "## Links"
+              echo
+              if [[ -n "$previous_tag" ]]; then
+                echo "- [Full commit comparison](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/compare/${previous_tag}...${RELEASE_TAG})"
+              else
+                echo "- [Complete commit history](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/commits/${RELEASE_TAG})"
+              fi
+              echo "- [Installation and usage guide](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/blob/${RELEASE_TAG}/README.md)"
+            } > release-notes.md
+          else
+            subject=$(git log -1 --pretty=%s)
+            {
+              echo "Automated prerelease built from [\`${GITHUB_SHA::7}\`](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/commit/${GITHUB_SHA}): $subject"
+              echo
+              echo "This rolling release is replaced after every successful complete build matrix. Use the [latest stable release](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/latest) for production deployments."
+            } > release-notes.md
+          fi
+          cat release-notes.md
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
@@ -1123,5 +1248,7 @@ jobs:
           name: ${{ steps.tag.outputs.name }}
           prerelease: ${{ steps.tag.outputs.prerelease }}
           make_latest: ${{ steps.tag.outputs.prerelease == 'false' }}
-          generate_release_notes: true
+          body_path: release-notes.md
+          append_body: false
+          generate_release_notes: false
           files: release/*

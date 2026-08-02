@@ -59,7 +59,7 @@ ip -n "$client_ns" link set "$client_if" up
 ip netns exec "$client_ns" sysctl -q -w net.ipv4.ping_group_range="0 2147483647"
 
 HANS_STATE_DIR="$work/server-state" ip netns exec "$server_ns" "$BINABS" \
-    -s 10.77.88.0 -p hans-userspace-ci -f -v >"$server_log" 2>&1 &
+    -s 10.77.88.0 -p hans-userspace-ci --require-v5 -f -v >"$server_log" 2>&1 &
 server_pid=$!
 
 # The stripped product is intentionally tested without net-tools.  Older Hans
@@ -121,7 +121,7 @@ udp_pid=$!
 
 ip netns exec "$client_ns" setpriv --reuid 65534 --regid 65534 --clear-groups \
     env HANS_STATE_DIR="$work/client-state" "$BINABS" \
-    -c 192.0.2.1 -p hans-userspace-ci -f -v \
+    -c 192.0.2.1 -p hans-userspace-ci --require-v5 -f -v \
     --feature userspace --socks5 127.0.0.1:18080 \
     --socks5-user hans --socks5-password-file "$work/socks-password" \
     --shareports 18081,18082=127.0.0.1:18081 --allports \
@@ -143,13 +143,15 @@ done
 [ "$connected" -eq 1 ]
 grep -q "using unprivileged ICMP ping socket" "$client_log"
 grep -q "sharing otherwise-unmapped VPN TCP ports" "$client_log"
+grep -q "sending protocol v5 connection request" "$client_log"
+grep -q "secure protocol v5 connection established" "$server_log"
 
 # A second unprivileged userspace process has the same underlay source IP.
-# Protocol v4 must demultiplex it by receiver index and assign an independent
+# Protocol v5 must demultiplex it by receiver index and assign an independent
 # authenticated sticky identity instead of replacing the first client.
 ip netns exec "$client_ns" setpriv --reuid 65534 --regid 65534 --clear-groups \
     env HANS_STATE_DIR="$work/client2-state" "$BINABS" \
-    -c 192.0.2.1 -p hans-userspace-ci -f -v \
+    -c 192.0.2.1 -p hans-userspace-ci --require-v5 -f -v \
     --feature userspace --socks5 127.0.0.1:18084 \
     --shareports 18085=127.0.0.1:18081 \
     >"$work/client2.log" 2>&1 &

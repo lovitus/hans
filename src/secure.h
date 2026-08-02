@@ -95,6 +95,18 @@ private:
     bool initialized;
 };
 
+class HandshakeEnvelopeV5
+{
+public:
+    enum { NONCE_SIZE = 24, TAG_SIZE = 16, OVERHEAD = 40 };
+
+    static void deriveKey(const uint8_t psk[32], uint8_t key[32]);
+    static bool seal(const uint8_t key[32], const uint8_t *plain,
+                     size_t plainLength, std::vector<uint8_t> &packet);
+    static bool open(const uint8_t key[32], const uint8_t *packet,
+                     size_t packetLength, std::vector<uint8_t> &plain);
+};
+
 class SecureTransport
 {
 public:

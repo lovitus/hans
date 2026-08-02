@@ -101,12 +101,22 @@ protected:
     void sendEcho(const TunnelHeader::Magic &magic, TunnelHeader::Type type,
                   int length, const Echo::Address &realAddress, bool reply,
                   uint16_t id, uint16_t seq);
+    void sendRawEcho(int length, const Echo::Address &realAddress, bool reply,
+                     uint16_t id, uint16_t seq);
     void sendToTun(int length); // from echoReceivePayloadBuffer
 
     void setTimeout(Time delta);
 
     char *echoSendPayloadBuffer();
     char *echoReceivePayloadBuffer();
+    char *rawEchoSendPayloadBuffer();
+    char *rawEchoReceivePayloadBuffer();
+
+    int rawPayloadBufferSize()
+    {
+        return tunnelMtu + sizeof(TunnelHeader) + TransportV3::HEADER_SIZE +
+               SecureTransport::OVERHEAD;
+    }
 
     int payloadBufferSize()
     {

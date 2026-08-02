@@ -91,22 +91,24 @@ static void sig_int_handler(int)
 static void usage()
 {
     std::cerr <<
-        "Hans - IP over ICMP version 1.5\n\n"
+        "Hans - IP over ICMP version 1.6.0\n\n"
         "RUN AS CLIENT (TUN/TAP, DEFAULT)\n"
         "  hans -c server [-fv] [-p passphrase] [-u user] [-d tun_device]\n"
         "       [-m reference_mtu] [-w auto|polls] [--device-id id]\n"
         "       [--device-id-file path]\n"
-        "       [--identity-file path] [--server-fingerprint hex] [--require-v4]\n\n"
+        "       [--identity-file path] [--server-fingerprint hex] [--require-v4]\n"
+        "       [--require-v5]\n\n"
         "RUN AS USERSPACE CLIENT (NO TUN/TAP)\n"
         "  hans -c server [-fv] [-p passphrase] [-u user]\n"
         "       [-m reference_mtu] [-w auto|polls] [--device-id id]\n"
         "       [--device-id-file path] --feature userspace\n"
         "       [--socks5 IPv4:port] [--shareports mappings] [--allports]\n"
         "       [--socks5-user name] [--socks5-password-file path]\n"
-        "       [--identity-file path] [--server-fingerprint hex] [--require-v4]\n\n"
+        "       [--identity-file path] [--server-fingerprint hex] [--require-v4]\n"
+        "       [--require-v5]\n\n"
         "RUN AS SERVER (linux only)\n"
         "  hans -s network [-fvr] [-p passphrase] [-u user] [-d tun_device]\n"
-        "       [-m reference_mtu] [--lease-file path]\n\n"
+        "       [-m reference_mtu] [--lease-file path] [--require-v4|--require-v5]\n\n"
         "LIST SERVER PEERS\n"
         "  hans --list-peers [--lease-file path]\n\n"
         "SHOW CLIENT DEVICE ID\n"
@@ -164,8 +166,11 @@ static void usage()
         "  --show-identity\n"
         "                Print the stable fingerprint derived from that key.\n"
         "  --server-fingerprint hex\n"
-        "                Require the server Noise key to match this fingerprint.\n"
-        "  --require-v4  Refuse unauthenticated downgrade to legacy protocols.\n"
+        "                Require the server Noise key to match this fingerprint;\n"
+        "                this also refuses unencrypted v1-v3 fallback.\n"
+        "  --require-v4  Client/server: require encrypted protocol v4 or newer.\n"
+        "  --require-v5  Client: refuse fallback from fully wrapped protocol v5.\n"
+        "                Server: silently accept protocol v5 only.\n"
         "  -h, --help    Show this help and exit.\n"
         "  -f            Run in foreground.\n"
         "  -v            Print debug information.\n";
@@ -205,6 +210,7 @@ int main(int argc, char *argv[])
     string serverFingerprint;
     bool showIdentity = false;
     bool requireV4 = false;
+    bool requireV5 = false;
     bool json = false;
     bool doctor = false;
     string socksUser;
@@ -216,7 +222,7 @@ int main(int argc, char *argv[])
     enum { OPTION_FEATURE = 1000, OPTION_SOCKS5, OPTION_SHAREPORTS,
            OPTION_ALLPORTS,
            OPTION_IDENTITY_FILE, OPTION_SHOW_IDENTITY,
-           OPTION_SERVER_FINGERPRINT, OPTION_REQUIRE_V4,
+           OPTION_SERVER_FINGERPRINT, OPTION_REQUIRE_V4, OPTION_REQUIRE_V5,
            OPTION_SOCKS5_USER, OPTION_SOCKS5_PASSWORD_FILE, OPTION_JSON,
            OPTION_DOCTOR, OPTION_PASSPHRASE_FILE };
     static struct option longOptions[] = {
@@ -234,6 +240,7 @@ int main(int argc, char *argv[])
         {"show-identity", no_argument, NULL, OPTION_SHOW_IDENTITY},
         {"server-fingerprint", required_argument, NULL, OPTION_SERVER_FINGERPRINT},
         {"require-v4", no_argument, NULL, OPTION_REQUIRE_V4},
+        {"require-v5", no_argument, NULL, OPTION_REQUIRE_V5},
         {"socks5-user", required_argument, NULL, OPTION_SOCKS5_USER},
         {"socks5-password-file", required_argument, NULL, OPTION_SOCKS5_PASSWORD_FILE},
         {"json", no_argument, NULL, OPTION_JSON},
@@ -365,6 +372,9 @@ int main(int argc, char *argv[])
             case OPTION_REQUIRE_V4:
                 requireV4 = true;
                 break;
+            case OPTION_REQUIRE_V5:
+                requireV5 = true;
+                break;
             case OPTION_SOCKS5_USER:
                 socksUser = optarg;
                 break;
@@ -495,6 +505,12 @@ int main(int argc, char *argv[])
         }
     }
 
+    // A fingerprint cannot be enforced by legacy v1-v3.  Treat a pin as an
+    // implicit encrypted-protocol requirement so a compatibility timeout can
+    // never silently discard the user's authentication policy.
+    if (!serverFingerprint.empty())
+        requireV4 = true;
+
     mtu -= Echo::headerSize() + Worker::headerSize();
 
     if (mtu < 68)
@@ -515,7 +531,7 @@ int main(int argc, char *argv[])
         (userspace && !device.empty()) ||
         ((!socksUser.empty() || !socksPasswordFile.empty()) &&
          (!userspace || socksAddress.empty())) ||
-        (isServer && (!serverFingerprint.empty() || requireV4)))
+        (isServer && !serverFingerprint.empty()))
     {
         usage();
         return 1;
@@ -553,7 +569,7 @@ int main(int argc, char *argv[])
         {
             worker = new Server(mtu, device.empty() ? NULL : &device, passphrase,
                                 network, answerPing, uid, gid, 5000, leaseFile,
-                                identityFile);
+                                identityFile, requireV4, requireV5);
         }
         else
         {
@@ -614,7 +630,7 @@ int main(int argc, char *argv[])
                                 changeEchoId, changeEchoSeq, clientIp, deviceId,
                                 userspace, socksAddress, sharePorts, allPorts,
                                 identityFile,
-                                requireV4, serverFingerprint, socksUser,
+                                requireV4, requireV5, serverFingerprint, socksUser,
                                 socksPassword);
 
             freeaddrinfo(res);

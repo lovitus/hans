@@ -44,7 +44,7 @@ ip -n "$server_ns" link set "v6a$suffix" up
 ip -n "$client_ns" link set "v6b$suffix" up
 
 HANS_STATE_DIR="$work/server-state" ip netns exec "$server_ns" "$BINABS" \
-    -s 10.91.0.0 -p hans-ipv6-ci -f -v >"$work/server.log" 2>&1 &
+    -s 10.91.0.0 -p hans-ipv6-ci --require-v5 -f -v >"$work/server.log" 2>&1 &
 server_pid=$!
 sleep 1
 # Keep the server's IPv4 raw socket continuously busy while the IPv6 client
@@ -53,7 +53,7 @@ sleep 1
 ip netns exec "$client_ns" ping -4 -f -q 192.0.2.1 >"$work/noise.log" 2>&1 &
 noise_pid=$!
 HANS_STATE_DIR="$work/client-state" ip netns exec "$client_ns" "$BINABS" \
-    -c 2001:db8:44::9 -p hans-ipv6-ci --require-v4 -f -v \
+    -c 2001:db8:44::9 -p hans-ipv6-ci --require-v5 -f -v \
     >"$work/client.log" 2>&1 &
 client_pid=$!
 
@@ -67,7 +67,7 @@ while [ "$attempt" -gt 0 ]; do
 done
 ip -n "$client_ns" -4 addr show | grep -q '10.91.0.100/24'
 ip netns exec "$client_ns" ping -c 5 -W 2 10.91.0.1
-grep -q 'secure protocol v4 connection established to 2001:db8:44::2' \
+grep -q 'secure protocol v5 connection established to 2001:db8:44::2' \
     "$work/server.log"
 grep -q 'authenticated server handshake moved from 2001:db8:44::9 to 2001:db8:44::1' \
     "$work/client.log"

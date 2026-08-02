@@ -43,6 +43,7 @@ public:
            bool allPorts = false,
            const std::string &identityFile = std::string(),
            bool requireV4 = false,
+           bool requireV5 = false,
            const std::string &serverFingerprint = std::string(),
            const std::string &socksUser = std::string(),
            const std::string &socksPassword = std::string());
@@ -93,7 +94,10 @@ protected:
     void sendV3ToServer(Worker::TunnelHeader::Type type, int dataLength,
                         uint8_t flags, bool trackPoll);
     bool openV4Packet(const TunnelHeader &header, int &dataLength);
+    bool openV5Packet(TunnelHeader::Type &type, int &dataLength);
     void sendV4HandshakeFinish();
+    void sendV5HandshakeFinish();
+    void sendRawEchoToServer(const uint8_t *packet, int length);
     uint32_t echoKey(uint16_t id, uint16_t seq) const;
     const Worker::TunnelHeader::Magic &clientMagic() const;
     const Worker::TunnelHeader::Magic &serverMagic() const;
@@ -111,6 +115,7 @@ protected:
     int protocolVersion;
     int protocolRequestAttempts;
     bool requireV4;
+    bool requireV5;
     std::string expectedServerFingerprint;
 
     int maxPolls;
@@ -122,6 +127,7 @@ protected:
     uint32_t peerReceiverIndex;
     SecureIdentity secureIdentity;
     uint8_t securePsk[32];
+    uint8_t handshakeKeyV5[32];
     NoiseHandshake *secureHandshake;
     SecureTransport secureTransport;
     uint32_t nextTransportSequence;

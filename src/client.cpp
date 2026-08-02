@@ -52,6 +52,11 @@ namespace
     const int V4_CREDIT_HEARTBEAT_MS = 5000;
     const int V4_SESSION_TIMEOUT_MS = 20000;
     const int V4_RECONNECT_JITTER_MS = 2000;
+    const uint8_t V5_HANDSHAKE_INIT = 1;
+    const uint8_t V5_HANDSHAKE_RESPONSE = 2;
+    const uint8_t V5_HANDSHAKE_FINISH = 3;
+    const uint8_t V5_CLIENT_DATA_AD[] = "Hans protocol v5 client data";
+    const uint8_t V5_SERVER_DATA_AD[] = "Hans protocol v5 server data";
     uint32_t get32(const char *buffer)
     {
         uint32_t value;
@@ -78,7 +83,7 @@ Client::Client(int tunnelMtu, const string *deviceName,
                const string &socksAddress,
                const vector<SharePort> &sharePorts,
                bool allPorts,
-               const string &identityFile, bool requireV4,
+               const string &identityFile, bool requireV4, bool requireV5,
                const string &serverFingerprint, const string &socksUser,
                const string &socksPassword)
     : Worker(tunnelMtu, deviceName, false, uid, gid, !userspace, userspace),
@@ -94,9 +99,10 @@ Client::Client(int tunnelMtu, const string *deviceName,
     this->changeEchoSeq = changeEchoSeq;
     this->nextEchoSequence = Utility::rand();
     this->deviceId = deviceId;
-    this->protocolVersion = 4;
+    this->protocolVersion = 5;
     this->protocolRequestAttempts = 0;
     this->requireV4 = requireV4;
+    this->requireV5 = requireV5;
     this->expectedServerFingerprint = serverFingerprint;
     this->negotiatedCapabilities = 0;
     this->sessionId = 0;
@@ -107,6 +113,7 @@ Client::Client(int tunnelMtu, const string *deviceName,
                                 Utility::defaultStateFile("identity.key") :
                                 identityFile);
     NoiseHandshake::derivePsk(passphrase, securePsk);
+    HandshakeEnvelopeV5::deriveKey(securePsk, handshakeKeyV5);
     this->nextTransportSequence = Utility::random32();
     this->transportMode = TransportV3::MODE_CREDIT;
     this->peerTransportMode = TransportV3::MODE_CREDIT;
@@ -132,6 +139,7 @@ Client::~Client()
 {
     delete secureHandshake;
     memset(securePsk, 0, sizeof(securePsk));
+    memset(handshakeKeyV5, 0, sizeof(handshakeKeyV5));
     delete userspaceNetwork;
 }
 
@@ -139,6 +147,8 @@ void Client::sendConnectionRequest()
 {
     if (protocolRequestAttempts >= 2 && protocolVersion > 1)
     {
+        if (protocolVersion == 5 && requireV5)
+            throw Exception("secure protocol v5 handshake timed out; refusing downgrade");
         if (protocolVersion == 4 && requireV4)
             throw Exception("secure protocol v4 handshake timed out; refusing downgrade");
         protocolVersion--;
@@ -149,7 +159,32 @@ void Client::sendConnectionRequest()
 
     syslog(LOG_DEBUG, "sending protocol v%d connection request", protocolVersion);
 
-    if (protocolVersion == 4)
+    if (protocolVersion == 5)
+    {
+        delete secureHandshake;
+        secureHandshake = new NoiseHandshake(NoiseHandshake::INITIATOR,
+                                              secureIdentity.secretKey(),
+                                              securePsk);
+        do localReceiverIndex = Utility::random32(); while (localReceiverIndex == 0);
+        peerReceiverIndex = 0;
+        std::vector<uint8_t> message;
+        if (!secureHandshake->writeMessage1(message))
+            throw Exception("creating secure handshake initiation");
+        uint8_t plain[40];
+        memset(plain, 0, sizeof(plain));
+        plain[0] = V5_HANDSHAKE_INIT;
+#ifdef WIN32
+        if (userspaceNetwork != NULL)
+            plain[1] |= TransportV3::CAP_WINDOWS_ICMP_HELPER;
+#endif
+        put32((char *)plain + 4, localReceiverIndex);
+        memcpy(plain + 8, &message[0], message.size());
+        std::vector<uint8_t> envelope;
+        HandshakeEnvelopeV5::seal(handshakeKeyV5, plain, sizeof(plain),
+                                  envelope);
+        sendRawEchoToServer(&envelope[0], (int)envelope.size());
+    }
+    else if (protocolVersion == 4)
     {
         delete secureHandshake;
         secureHandshake = new NoiseHandshake(NoiseHandshake::INITIATOR,
@@ -218,6 +253,19 @@ void Client::sendConnectionRequest()
     setTimeout(5000);
 }
 
+void Client::sendRawEchoToServer(const uint8_t *packet, int length)
+{
+    if (length < 0 || length > rawPayloadBufferSize())
+        throw Exception("packet too big");
+    if (length > 0)
+        memcpy(rawEchoSendPayloadBuffer(), packet, length);
+    sendRawEcho(length, serverAddress, false, nextEchoId, nextEchoSequence);
+    if (changeEchoId)
+        nextEchoId = nextEchoId + 38543;
+    if (changeEchoSeq)
+        nextEchoSequence = nextEchoSequence + 38543;
+}
+
 void Client::sendV4HandshakeFinish()
 {
     Server::ClientConnectDataV3 connectData;
@@ -252,6 +300,43 @@ void Client::sendV4HandshakeFinish()
     setTimeout(5000);
 }
 
+void Client::sendV5HandshakeFinish()
+{
+    Server::ClientConnectDataV3 connectData;
+    memset(&connectData, 0, sizeof(connectData));
+    connectData.v2.legacy.maxPolls = autoPoll ? adaptiveCredit.target() : maxPolls;
+    connectData.v2.legacy.desiredIp = desiredIp;
+    memcpy(connectData.v2.deviceId, deviceId.data(), DEVICE_ID_HEX_SIZE);
+    connectData.capabilities = autoPoll ? TransportV3::ALL_CAPABILITIES :
+                                         TransportV3::CAP_SEQUENCE_ACK;
+#ifdef WIN32
+    if (userspaceNetwork != NULL)
+        connectData.capabilities |= TransportV3::CAP_WINDOWS_ICMP_HELPER;
+#endif
+    connectData.minimumPolls = 2;
+    connectData.maximumPolls = 128;
+    uint8_t metadata[sizeof(connectData) + 2];
+    memcpy(metadata, &connectData, sizeof(connectData));
+    put16((char *)metadata + sizeof(connectData), (uint16_t)tunnelMtu);
+    std::vector<uint8_t> message;
+    if (secureHandshake == NULL ||
+        !secureHandshake->writeMessage3(metadata, sizeof(metadata), message))
+        throw Exception("creating secure handshake finish");
+    secureTransport.initialize(peerReceiverIndex, localReceiverIndex,
+                               secureHandshake->sendKey(),
+                               secureHandshake->receiveKey());
+    std::vector<uint8_t> plain(9 + message.size());
+    plain[0] = V5_HANDSHAKE_FINISH;
+    put32((char *)&plain[1], localReceiverIndex);
+    put32((char *)&plain[5], peerReceiverIndex);
+    memcpy(&plain[9], &message[0], message.size());
+    std::vector<uint8_t> envelope;
+    HandshakeEnvelopeV5::seal(handshakeKeyV5, &plain[0], plain.size(), envelope);
+    sendRawEchoToServer(&envelope[0], (int)envelope.size());
+    state = STATE_CHALLENGE_RESPONSE_SENT;
+    setTimeout(5000);
+}
+
 void Client::sendChallengeResponse(int dataLength)
 {
     if (dataLength != CHALLENGE_SIZE)
@@ -280,6 +365,53 @@ bool Client::handleEchoData(const TunnelHeader &header, int dataLength,
     if (!reply)
         return false;
 
+    TunnelHeader::Type messageType = (TunnelHeader::Type)header.type;
+    if (protocolVersion == 5)
+    {
+        const int rawLength = dataLength + (int)sizeof(TunnelHeader);
+        if (state == STATE_CONNECTION_REQUEST_SENT)
+        {
+            std::vector<uint8_t> plain;
+            if (!HandshakeEnvelopeV5::open(
+                    handshakeKeyV5,
+                    (const uint8_t *)rawEchoReceivePayloadBuffer(),
+                    rawLength, plain))
+                return true;
+            // The kernel may echo the authenticated initiation before the
+            // userspace server response. It is valid but not a response.
+            if (plain.size() != 105 || plain[0] != V5_HANDSHAKE_RESPONSE ||
+                get32((const char *)&plain[5]) != localReceiverIndex)
+                return true;
+            peerReceiverIndex = get32((const char *)&plain[1]);
+            if (peerReceiverIndex == 0 || secureHandshake == NULL ||
+                !secureHandshake->readMessage2(&plain[9], 96))
+                throw Exception("invalid secure v5 handshake response");
+            const string serverFingerprint = SecureIdentity::fingerprint(
+                secureHandshake->remoteStaticKey());
+            if (!expectedServerFingerprint.empty() &&
+                serverFingerprint != expectedServerFingerprint)
+                throw Exception("secure server fingerprint mismatch");
+            if (realAddress != serverAddress)
+            {
+                syslog(LOG_INFO,
+                       "authenticated server handshake moved from %s to %s",
+                       serverAddress.format().c_str(),
+                       realAddress.format().c_str());
+                serverAddress = realAddress;
+            }
+            syslog(LOG_INFO, "secure server fingerprint %s",
+                   serverFingerprint.c_str());
+            protocolRequestAttempts = 0;
+            sendV5HandshakeFinish();
+            return true;
+        }
+
+        if (realAddress != serverAddress || !secureTransport.ready())
+            return false;
+        if (!openV5Packet(messageType, dataLength))
+            return true;
+    }
+
     // A raw IPv6 socket is not tied to the destination address that received
     // a request.  On a multi-address server the kernel may therefore choose a
     // different local source for the Noise response.  Admit only the v4
@@ -293,7 +425,7 @@ bool Client::handleEchoData(const TunnelHeader &header, int dataLength,
     if (realAddress != serverAddress && !authenticatableHandshakeSource)
         return false;
 
-    if (header.magic != serverMagic())
+    if (protocolVersion != 5 && header.magic != serverMagic())
         return false;
 
     if (protocolVersion == 4 && state == STATE_CONNECTION_REQUEST_SENT &&
@@ -342,7 +474,7 @@ bool Client::handleEchoData(const TunnelHeader &header, int dataLength,
     {
         if (!parseTransportHeader(dataLength, transport, id, seq))
             return true;
-        bool isData = header.type == TunnelHeader::TYPE_DATA;
+        bool isData = messageType == TunnelHeader::TYPE_DATA;
         reorderAction = reorderBuffer.observe(
             transport.txSequence, isData,
             echoReceivePayloadBuffer() + TransportV3::HEADER_SIZE,
@@ -354,14 +486,15 @@ bool Client::handleEchoData(const TunnelHeader &header, int dataLength,
         logTransportTelemetry();
     }
 
-    switch (header.type)
+    switch (messageType)
     {
         case TunnelHeader::TYPE_RESET_CONNECTION:
             syslog(LOG_DEBUG, "reset received");
 
             if (state == STATE_ESTABLISHED)
             {
-                protocolVersion = 4;
+                if (protocolVersion < 4)
+                    protocolVersion = 4;
                 protocolRequestAttempts = 0;
             }
             // A server also uses RESET to retire an old session from this
@@ -412,7 +545,7 @@ bool Client::handleEchoData(const TunnelHeader &header, int dataLength,
                         (transportMode != TransportV3::MODE_CREDIT &&
                          transportMode != TransportV3::MODE_DIRECT))
                         throw Exception("invalid transport negotiation received");
-                    if (protocolVersion == 4)
+                    if (protocolVersion >= 4)
                     {
                         uint16_t negotiatedMtu;
                         memcpy(&negotiatedMtu,
@@ -522,7 +655,7 @@ bool Client::handleEchoData(const TunnelHeader &header, int dataLength,
             break;
     }
 
-    syslog(LOG_DEBUG, "invalid packet type: %d, state: %d", header.type, state);
+    syslog(LOG_DEBUG, "invalid packet type: %d, state: %d", messageType, state);
 
     return true;
 }
@@ -574,7 +707,18 @@ void Client::sendV3ToServer(Worker::TunnelHeader::Type type, int dataLength,
 {
     char *payload = echoSendPayloadBuffer();
     char *transportPayload = payload;
-    if (protocolVersion == 4)
+    uint8_t *v5Packet = NULL;
+    if (protocolVersion == 5)
+    {
+        v5Packet = (uint8_t *)rawEchoSendPayloadBuffer();
+        if (dataLength > 0)
+            memmove(v5Packet + SecureTransport::PREFIX_SIZE + 1 +
+                              TransportV3::HEADER_SIZE,
+                    payload, dataLength);
+        v5Packet[SecureTransport::PREFIX_SIZE] = (uint8_t)type;
+        transportPayload = (char *)v5Packet + SecureTransport::PREFIX_SIZE + 1;
+    }
+    else if (protocolVersion == 4)
     {
         if (dataLength > 0)
             memmove(payload + SecureTransport::PREFIX_SIZE +
@@ -601,7 +745,22 @@ void Client::sendV3ToServer(Worker::TunnelHeader::Type type, int dataLength,
     uint16_t sentId = nextEchoId;
     uint16_t sentSeq = nextEchoSequence;
     int wireLength = dataLength + TransportV3::HEADER_SIZE;
-    if (protocolVersion == 4)
+    if (protocolVersion == 5)
+    {
+        int plainLength = wireLength + 1;
+        if (!secureTransport.sealPrepared(
+                V5_CLIENT_DATA_AD, sizeof(V5_CLIENT_DATA_AD) - 1,
+                v5Packet, plainLength, rawPayloadBufferSize()))
+            throw Exception("encrypting tunnel packet");
+        wireLength = plainLength + SecureTransport::OVERHEAD;
+        sendRawEcho(wireLength, serverAddress, false,
+                    nextEchoId, nextEchoSequence);
+        if (changeEchoId)
+            nextEchoId = nextEchoId + 38543;
+        if (changeEchoSeq)
+            nextEchoSequence = nextEchoSequence + 38543;
+    }
+    else if (protocolVersion == 4)
     {
         TunnelHeader ad;
         ad.magic = clientMagic();
@@ -611,8 +770,10 @@ void Client::sendV3ToServer(Worker::TunnelHeader::Type type, int dataLength,
                 wireLength, payloadBufferSize()))
             throw Exception("encrypting tunnel packet");
         wireLength += SecureTransport::OVERHEAD;
+        sendEchoToServer(type, wireLength);
     }
-    sendEchoToServer(type, wireLength);
+    else
+        sendEchoToServer(type, wireLength);
     // Adaptive credits need a unique request token so replies can be matched
     // to their send time even when the legacy -q option was not requested.
     if (!changeEchoSeq)
@@ -642,6 +803,32 @@ bool Client::openV4Packet(const TunnelHeader &header, int &dataLength)
         return false;
     }
     dataLength = (int)plainLength;
+    return true;
+}
+
+bool Client::openV5Packet(TunnelHeader::Type &type, int &dataLength)
+{
+    uint8_t *packet = (uint8_t *)rawEchoReceivePayloadBuffer();
+    size_t packetLength = (size_t)dataLength + sizeof(TunnelHeader);
+    if (packetLength < SecureTransport::OVERHEAD + 1 ||
+        get32((const char *)packet) != localReceiverIndex)
+        return false;
+    size_t plainLength = 0;
+    if (!secureTransport.openInPlace(
+            V5_SERVER_DATA_AD, sizeof(V5_SERVER_DATA_AD) - 1,
+            packet, packetLength, plainLength) || plainLength < 1)
+    {
+        syslog(LOG_WARNING, "discarding unauthenticated protocol v5 packet");
+        return false;
+    }
+    uint8_t rawType = packet[0];
+    if (rawType < TunnelHeader::TYPE_RESET_CONNECTION ||
+        rawType > TunnelHeader::TYPE_HANDSHAKE_FINISH)
+        return false;
+    type = (TunnelHeader::Type)rawType;
+    dataLength = (int)plainLength - 1;
+    if (dataLength > 0)
+        memmove(echoReceivePayloadBuffer(), packet + 1, dataLength);
     return true;
 }
 
@@ -702,7 +889,7 @@ void Client::startPolling()
         else if (maxPolls == 0)
         {
             transportMode = TransportV3::MODE_DIRECT;
-            setTimeout(protocolVersion == 4 ? DIRECT_HEARTBEAT_MS :
+            setTimeout(protocolVersion >= 4 ? DIRECT_HEARTBEAT_MS :
                        KEEP_ALIVE_INTERVAL);
         }
         else
@@ -773,7 +960,7 @@ void Client::switchToCredit(const char *reason)
 
 bool Client::maintainV4Session()
 {
-    if (protocolVersion != 4 || state != STATE_ESTABLISHED)
+    if (protocolVersion < 4 || state != STATE_ESTABLISHED)
         return false;
 
     const int heartbeatInterval = transportMode == TransportV3::MODE_DIRECT ?
@@ -798,8 +985,8 @@ bool Client::maintainV4Session()
                               (V4_RECONNECT_JITTER_MS + 1);
         v4ReconnectDeadline = now + Time((int)jitter);
         syslog(LOG_WARNING,
-               "authenticated v4 heartbeat timed out; reconnecting in %u ms",
-               jitter);
+               "authenticated protocol v%d heartbeat timed out; reconnecting in %u ms",
+               protocolVersion, jitter);
         return false;
     }
     if (v4ReconnectDeadline > now)
@@ -811,8 +998,10 @@ bool Client::maintainV4Session()
 
 void Client::restartV4Session()
 {
-    syslog(LOG_WARNING, "reconnecting expired protocol v4 session");
-    protocolVersion = 4;
+    syslog(LOG_WARNING, "reconnecting expired secure protocol v%d session",
+           protocolVersion);
+    if (protocolVersion < 4)
+        protocolVersion = 4;
     protocolRequestAttempts = 0;
     negotiatedCapabilities = 0;
     sessionId = 0;
@@ -990,7 +1179,7 @@ void Client::handleTimeout()
             break;
 
         case STATE_ESTABLISHED:
-            if (protocolVersion == 4 && !autoPoll)
+            if (protocolVersion >= 4 && !autoPoll)
             {
                 if (maintainV4Session())
                     break;
