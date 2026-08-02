@@ -128,6 +128,7 @@ protected:
 
     Time now;
 private:
+    void handleEchoFd(int readyFd);
     int readIcmpData(int *realIp, int *id, int *seq);
 
     Time nextTimeout;

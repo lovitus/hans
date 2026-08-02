@@ -274,7 +274,20 @@ bool Client::handleEchoData(const TunnelHeader &header, int dataLength,
                             const Echo::Address &realAddress, bool reply, uint16_t id,
                             uint16_t seq)
 {
-    if (realAddress != serverAddress || !reply)
+    if (!reply)
+        return false;
+
+    // A raw IPv6 socket is not tied to the destination address that received
+    // a request.  On a multi-address server the kernel may therefore choose a
+    // different local source for the Noise response.  Admit only the v4
+    // handshake response here; its PSK, server static key and optional pin are
+    // authenticated below before the new address is trusted.  Legacy
+    // handshakes and all established traffic retain strict address matching.
+    bool authenticatableHandshakeSource =
+        protocolVersion == 4 && state == STATE_CONNECTION_REQUEST_SENT &&
+        header.magic == Server::v4Magic &&
+        header.type == TunnelHeader::TYPE_HANDSHAKE_RESPONSE;
+    if (realAddress != serverAddress && !authenticatableHandshakeSource)
         return false;
 
     if (header.magic != serverMagic())
@@ -296,6 +309,14 @@ bool Client::handleEchoData(const TunnelHeader &header, int dataLength,
         if (!expectedServerFingerprint.empty() &&
             serverFingerprint != expectedServerFingerprint)
             throw Exception("secure server fingerprint mismatch");
+        if (realAddress != serverAddress)
+        {
+            syslog(LOG_INFO,
+                   "authenticated server handshake moved from %s to %s",
+                   serverAddress.format().c_str(),
+                   realAddress.format().c_str());
+            serverAddress = realAddress;
+        }
         syslog(LOG_INFO, "secure server fingerprint %s",
                serverFingerprint.c_str());
         protocolRequestAttempts = 0;

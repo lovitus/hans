@@ -150,45 +150,15 @@ void Worker::run()
         echo.beginBatch();
 
         // icmp data
-        int readyEchoFd = FD_ISSET(echo.getFd(), &readSet) ? echo.getFd() :
-                          (echo.getIpv6Fd() >= 0 &&
-                           FD_ISSET(echo.getIpv6Fd(), &readSet) ?
-                           echo.getIpv6Fd() : -1);
-        if (readyEchoFd >= 0)
-        {
-            Echo::ReceivedPacket packets[Echo::MAX_BATCH_PACKETS];
-            int packetCount = echo.receiveMany(readyEchoFd, packets,
-                                                Echo::MAX_BATCH_PACKETS);
-            for (int packetIndex = 0; packetIndex < packetCount; ++packetIndex)
-            {
-                Echo::ReceivedPacket &packet = packets[packetIndex];
-                echo.selectReceivedPacket(packet.bufferIndex);
-                int dataLength = packet.length;
-                bool valid = dataLength >= sizeof(TunnelHeader);
-
-                if (valid)
-                {
-                    TunnelHeader *header = (TunnelHeader *)echo.receivePayloadBuffer();
-
-                    DEBUG_ONLY(
-                        cout << "received: type " << header->type
-                             << ", length " << dataLength - sizeof(TunnelHeader)
-                             << ", id " << packet.id << ", seq "
-                             << packet.seq << endl);
-
-                    valid = handleEchoData(*header, dataLength - sizeof(TunnelHeader),
-                                           packet.address, packet.reply,
-                                           packet.id, packet.seq);
-                }
-
-                if (!valid && !packet.reply && answerEcho)
-                {
-                    memcpy(echo.sendPayloadBuffer(), echo.receivePayloadBuffer(), dataLength);
-                    echo.send(dataLength, packet.address, true,
-                              packet.id, packet.seq);
-                }
-            }
-        }
+        // IPv4 traffic must not starve ICMPv6 (or vice versa).  Public raw
+        // sockets can remain continuously readable because they also receive
+        // unrelated echo traffic, so service every ready family once per
+        // event-loop iteration instead of selecting only the first one.
+        if (FD_ISSET(echo.getFd(), &readSet))
+            handleEchoFd(echo.getFd());
+        if (echo.getIpv6Fd() >= 0 && echo.getIpv6Fd() != echo.getFd() &&
+            FD_ISSET(echo.getIpv6Fd(), &readSet))
+            handleEchoFd(echo.getIpv6Fd());
 
         // data from tun
         if (tun.getFd() >= 0 && FD_ISSET(tun.getFd(), &readSet))
@@ -219,6 +189,43 @@ void Worker::run()
             handleTimeout();
         }
         echo.endBatch();
+    }
+}
+
+void Worker::handleEchoFd(int readyFd)
+{
+    Echo::ReceivedPacket packets[Echo::MAX_BATCH_PACKETS];
+    int packetCount = echo.receiveMany(readyFd, packets,
+                                       Echo::MAX_BATCH_PACKETS);
+    for (int packetIndex = 0; packetIndex < packetCount; ++packetIndex)
+    {
+        Echo::ReceivedPacket &packet = packets[packetIndex];
+        echo.selectReceivedPacket(packet.bufferIndex);
+        int dataLength = packet.length;
+        bool valid = dataLength >= (int)sizeof(TunnelHeader);
+
+        if (valid)
+        {
+            TunnelHeader *header = (TunnelHeader *)echo.receivePayloadBuffer();
+
+            DEBUG_ONLY(
+                cout << "received: type " << header->type
+                     << ", length " << dataLength - sizeof(TunnelHeader)
+                     << ", id " << packet.id << ", seq "
+                     << packet.seq << endl);
+
+            valid = handleEchoData(*header, dataLength - sizeof(TunnelHeader),
+                                   packet.address, packet.reply,
+                                   packet.id, packet.seq);
+        }
+
+        if (!valid && !packet.reply && answerEcho)
+        {
+            memcpy(echo.sendPayloadBuffer(), echo.receivePayloadBuffer(),
+                   dataLength);
+            echo.send(dataLength, packet.address, true,
+                      packet.id, packet.seq);
+        }
     }
 }
 

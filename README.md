@@ -48,6 +48,11 @@ deployment, compatibility, and peer-management features:
   Receiver indexes, rather than source addresses, distinguish encrypted peers,
   so several clients behind one NAT can coexist. A source-address change is
   adopted only after a packet passes AEAD verification.
+- A protocol-v4 client also accepts an initial Noise response from a different
+  server source address, which Linux raw ICMPv6 may select on multi-address
+  interfaces. The new address is adopted only after the PSK, server static key,
+  and optional fingerprint pin have authenticated the response; legacy
+  handshakes keep strict source-address matching.
 - An explicitly selected userspace client does not create a kernel interface.
   Its embedded lwIP stack owns the assigned tunnel IP: SOCKS5 connections are
   emitted with that IP, and packets arriving at shared VPN ports are terminated
@@ -60,7 +65,8 @@ deployment, compatibility, and peer-management features:
   direct replies when possible. Every v3 packet carries a session ID, sequence,
   rolling ACK bitmap, and queue feedback; missed direct heartbeats trigger a
   conservative credit-mode fallback, with a later probe to recover direct mode.
-- On Linux the event loop may drain up to 16 packets that are already ready and
+- On Linux the event loop services every ready IPv4/IPv6 ICMP socket fairly,
+  then may drain up to 16 packets per family that are already ready and
   submit/receive them with batched syscalls. It remains one thread and processes
   every received datagram synchronously; control packets are flushed at the end
   of the same event-loop iteration rather than waiting for a batch timer. A
