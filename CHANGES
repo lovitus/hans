@@ -11,9 +11,6 @@ Release 1.6.0 (August 2026)
   ignore every earlier protocol before allocating handshake state
 * Make a pinned server fingerprint implicitly refuse unencrypted v1-v3
   fallback, so compatibility negotiation cannot discard the pin
-* Make Linux credit-mode fallback temporarily suppress competing kernel echo
-  replies with per-family reference counting, releasing the runtime sysctl
-  again after a direct-mode upgrade and never writing persistent settings
 * Extend protocol, wrong-key, tamper, replay, package-isolation, userspace,
   IPv6, direct-mode, bidirectional TCP, and server-restart recovery tests to v5
 

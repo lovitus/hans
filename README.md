@@ -343,24 +343,22 @@ arbitrary process has ICMP permission: some systems grant a capability or
 set-user-ID privilege only to that executable. Hans reports a specific ICMP
 permission error when neither a ping socket nor a raw socket is available.
 
-On a Linux server, adaptive credit mode and the Windows userspace IP Helper
-path both require the Hans reply to be the only echo reply for a request. The
-kernel's ordinary ping reply can otherwise win the race or cause a path that
-passes only one matching reply to discard the tunnel reply. Hans therefore
-changes the matching runtime knob—
+When a Windows userspace client connects to a Linux server, the Windows IP
+Helper API completes an echo operation on the first matching reply. The
+server kernel's ordinary ping reply can otherwise win the race against the
+Hans reply. A current client advertises its IP Helper path in the first
+handshake message. The Linux server then changes the matching runtime knob—
 `/proc/sys/net/ipv4/icmp_echo_ignore_all` or
 `/proc/sys/net/ipv6/icmp/echo_ignore_all`—to `1`. It reference-counts these
-settings separately. A normal client releases the setting after it upgrades
-to direct mode and reacquires it only if it falls back to credits; a Windows
-IP Helper client retains it for the session. Hans restores the value it
-observed when the last relevant peer disconnects or when the server exits
-normally. The setting applies to the whole network namespace; Hans does not
-write `sysctl.conf` or any other persistent configuration.
+settings separately and restores the value it observed when the last relevant
+Windows userspace peer disconnects or when the server exits normally. The
+setting applies to the whole network namespace; Hans does not write
+`sysctl.conf` or any other persistent configuration.
 
-The first request can already have received the ordinary kernel reply, so a
-Windows Helper handshake may take one retry. If the server lacks permission
-to open the runtime sysctl, Hans logs a warning. An administrator can apply
-the same non-persistent setting before starting the server:
+The first request can already have received the ordinary kernel reply, so the
+automatic handshake may take one retry. If the server lacks permission to
+open the runtime sysctl, Hans logs a warning. An administrator can apply the
+same non-persistent setting before starting the server:
 
 ```sh
 sudo sysctl -w net.ipv4.icmp_echo_ignore_all=1
