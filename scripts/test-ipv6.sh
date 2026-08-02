@@ -28,8 +28,11 @@ mkdir -p "$work/server-state" "$work/client-state"
 ip netns add "$server_ns"
 ip netns add "$client_ns"
 ip link add "v6a$suffix" type veth peer name "v6b$suffix"
+ip link add "v4a$suffix" type veth peer name "v4b$suffix"
 ip link set "v6a$suffix" netns "$server_ns"
 ip link set "v6b$suffix" netns "$client_ns"
+ip link set "v4a$suffix" netns "$server_ns"
+ip link set "v4b$suffix" netns "$client_ns"
 ip -n "$server_ns" link set lo up
 ip -n "$client_ns" link set lo up
 ip -n "$server_ns" -6 addr add 2001:db8:44::1/64 dev "v6a$suffix"
@@ -38,18 +41,21 @@ ip -n "$server_ns" -6 addr add 2001:db8:44::1/64 dev "v6a$suffix"
 ip -n "$server_ns" -6 addr add 2001:db8:44::9/64 dev "v6a$suffix" \
     preferred_lft 0
 ip -n "$client_ns" -6 addr add 2001:db8:44::2/64 dev "v6b$suffix"
-ip -n "$server_ns" -4 addr add 192.0.2.1/24 dev "v6a$suffix"
-ip -n "$client_ns" -4 addr add 192.0.2.2/24 dev "v6b$suffix"
+ip -n "$server_ns" -4 addr add 192.0.2.1/24 dev "v4a$suffix"
+ip -n "$client_ns" -4 addr add 192.0.2.2/24 dev "v4b$suffix"
 ip -n "$server_ns" link set "v6a$suffix" up
 ip -n "$client_ns" link set "v6b$suffix" up
+ip -n "$server_ns" link set "v4a$suffix" up
+ip -n "$client_ns" link set "v4b$suffix" up
 
 HANS_STATE_DIR="$work/server-state" ip netns exec "$server_ns" "$BINABS" \
     -s 10.91.0.0 -p hans-ipv6-ci --require-v5 -f -v >"$work/server.log" 2>&1 &
 server_pid=$!
 sleep 1
 # Keep the server's IPv4 raw socket continuously busy while the IPv6 client
-# connects.  This catches event loops that service only the first ready ICMP
-# family and starve ICMPv6 on noisy public hosts.
+# connects.  A separate veth keeps the flood from congesting the IPv6 link:
+# the assertion is about event-loop fairness between raw sockets, not about
+# delivering data through an intentionally saturated shared interface.
 ip netns exec "$client_ns" ping -4 -f -q 192.0.2.1 >"$work/noise.log" 2>&1 &
 noise_pid=$!
 HANS_STATE_DIR="$work/client-state" ip netns exec "$client_ns" "$BINABS" \
