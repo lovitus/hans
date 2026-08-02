@@ -1248,6 +1248,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.tag.outputs.tag }}
+          target_commitish: ${{ github.sha }}
           name: ${{ steps.tag.outputs.name }}
           prerelease: ${{ steps.tag.outputs.prerelease }}
           make_latest: ${{ steps.tag.outputs.prerelease == 'false' }}
