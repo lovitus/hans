@@ -49,6 +49,9 @@ namespace
     const int DIRECT_REPROBE_INTERVAL_MS = 30000;
     const int DIRECT_HEARTBEAT_MS = 1000;
     const int DIRECT_WATCHDOG_MS = 5000;
+    const int V4_CREDIT_HEARTBEAT_MS = 5000;
+    const int V4_SESSION_TIMEOUT_MS = 20000;
+    const int V4_RECONNECT_JITTER_MS = 2000;
     uint32_t get32(const char *buffer)
     {
         uint32_t value;
@@ -444,6 +447,8 @@ bool Client::handleEchoData(const TunnelHeader &header, int dataLength,
                 }
                 state = STATE_ESTABLISHED;
                 lastServerPacket = now;
+                lastTransportPing = Time::ZERO;
+                v4ReconnectDeadline = Time::ZERO;
 
                 dropPrivileges();
                 startPolling();
@@ -524,7 +529,8 @@ bool Client::handleEchoData(const TunnelHeader &header, int dataLength,
 
 void Client::sendEchoToServer(Worker::TunnelHeader::Type type, int dataLength)
 {
-    if (!autoPoll && maxPolls == 0 && state == STATE_ESTABLISHED)
+    if (!autoPoll && maxPolls == 0 && state == STATE_ESTABLISHED &&
+        protocolVersion < 4)
         setTimeout(KEEP_ALIVE_INTERVAL);
 
     sendEcho(clientMagic(), type, dataLength,
@@ -654,6 +660,7 @@ bool Client::parseTransportHeader(int &dataLength,
         return false;
 
     lastServerPacket = now;
+    v4ReconnectDeadline = Time::ZERO;
     peerTransportMode = transport.mode;
     dataLength -= TransportV3::HEADER_SIZE;
 
@@ -695,7 +702,8 @@ void Client::startPolling()
         else if (maxPolls == 0)
         {
             transportMode = TransportV3::MODE_DIRECT;
-            setTimeout(KEEP_ALIVE_INTERVAL);
+            setTimeout(protocolVersion == 4 ? DIRECT_HEARTBEAT_MS :
+                       KEEP_ALIVE_INTERVAL);
         }
         else
         {
@@ -763,8 +771,77 @@ void Client::switchToCredit(const char *reason)
     outstandingPolls.clear();
 }
 
+bool Client::maintainV4Session()
+{
+    if (protocolVersion != 4 || state != STATE_ESTABLISHED)
+        return false;
+
+    const int heartbeatInterval = transportMode == TransportV3::MODE_DIRECT ?
+        DIRECT_HEARTBEAT_MS : V4_CREDIT_HEARTBEAT_MS;
+    if (lastTransportPing == Time::ZERO ||
+        now > lastTransportPing + Time(heartbeatInterval))
+    {
+        sendV3ToServer(TunnelHeader::TYPE_TRANSPORT_PING, 0,
+                       TransportV3::FLAG_CONTROL, false);
+        lastTransportPing = now;
+    }
+
+    if (!(now > lastServerPacket + Time(V4_SESSION_TIMEOUT_MS)))
+    {
+        v4ReconnectDeadline = Time::ZERO;
+        return false;
+    }
+
+    if (v4ReconnectDeadline == Time::ZERO)
+    {
+        unsigned int jitter = Utility::random32() %
+                              (V4_RECONNECT_JITTER_MS + 1);
+        v4ReconnectDeadline = now + Time((int)jitter);
+        syslog(LOG_WARNING,
+               "authenticated v4 heartbeat timed out; reconnecting in %u ms",
+               jitter);
+        return false;
+    }
+    if (v4ReconnectDeadline > now)
+        return false;
+
+    restartV4Session();
+    return true;
+}
+
+void Client::restartV4Session()
+{
+    syslog(LOG_WARNING, "reconnecting expired protocol v4 session");
+    protocolVersion = 4;
+    protocolRequestAttempts = 0;
+    negotiatedCapabilities = 0;
+    sessionId = 0;
+    transportMode = TransportV3::MODE_CREDIT;
+    peerTransportMode = TransportV3::MODE_CREDIT;
+    directProbePending = false;
+    directProbeReplies = 0;
+    outstandingPolls.clear();
+    receivedSequences = SequenceTracker();
+    reorderBuffer = TransportReorderBuffer();
+    adaptiveCredit.reset();
+    secureTransport.reset();
+    nextTransportSequence = Utility::random32();
+    lastDirectProbe = Time::ZERO;
+    directProbeDeadline = Time::ZERO;
+    lastServerPacket = Time::ZERO;
+    lastTransportPing = Time::ZERO;
+    lastModeRequest = Time::ZERO;
+    lastTransportTelemetry = Time::ZERO;
+    v4ReconnectDeadline = Time::ZERO;
+    state = STATE_CLOSED;
+    sendConnectionRequest();
+}
+
 void Client::transportTick()
 {
+    if (maintainV4Session())
+        return;
+
     if (transportMode == TransportV3::MODE_CREDIT)
     {
         // A poll credit intentionally receives no reply while the server has
@@ -798,8 +875,9 @@ void Client::transportTick()
     }
     else
     {
-        if (lastTransportPing == Time::ZERO ||
-            now > lastTransportPing + Time(DIRECT_HEARTBEAT_MS))
+        if (protocolVersion < 4 &&
+            (lastTransportPing == Time::ZERO ||
+             now > lastTransportPing + Time(DIRECT_HEARTBEAT_MS)))
         {
             sendV3ToServer(TunnelHeader::TYPE_TRANSPORT_PING, 0,
                            TransportV3::FLAG_CONTROL, false);
@@ -912,6 +990,16 @@ void Client::handleTimeout()
             break;
 
         case STATE_ESTABLISHED:
+            if (protocolVersion == 4 && !autoPoll)
+            {
+                if (maintainV4Session())
+                    break;
+                if (maxPolls == 0)
+                {
+                    setTimeout(DIRECT_HEARTBEAT_MS);
+                    break;
+                }
+            }
             if (protocolVersion >= 3)
             {
                 if (autoPoll)

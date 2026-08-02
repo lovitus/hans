@@ -86,6 +86,8 @@ protected:
     void startDirectProbe();
     void requestMode(uint8_t mode);
     void switchToCredit(const char *reason);
+    bool maintainV4Session();
+    void restartV4Session();
     bool parseTransportHeader(int &dataLength, TransportV3::Header &transport,
                               uint16_t id, uint16_t seq);
     void sendV3ToServer(Worker::TunnelHeader::Type type, int dataLength,
@@ -137,6 +139,7 @@ protected:
     Time lastServerPacket;
     Time lastTransportPing;
     Time lastModeRequest;
+    Time v4ReconnectDeadline;
 
     bool changeEchoId, changeEchoSeq;
 

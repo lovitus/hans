@@ -70,6 +70,12 @@ static void testHandshakeAndTransport()
                                 sizeof(plainText), packet));
     packet[SecureTransport::PREFIX_SIZE] ^= 1;
     assert(!clientTransport.open(ad, sizeof(ad), &packet[0], packet.size(), opened));
+
+    serverTransport.reset();
+    assert(!serverTransport.ready());
+    assert(!serverTransport.seal(ad, sizeof(ad), (const uint8_t *)plainText,
+                                 sizeof(plainText), packet));
+    assert(!serverTransport.open(ad, sizeof(ad), &packet[0], packet.size(), opened));
 }
 
 static void testPreparedTransportMatchesWireFormat()

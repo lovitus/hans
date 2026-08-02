@@ -766,6 +766,17 @@ SecureTransport::~SecureTransport()
     crypto_wipe(receiveKeyValue, sizeof(receiveKeyValue));
 }
 
+void SecureTransport::reset()
+{
+    crypto_wipe(sendKeyValue, sizeof(sendKeyValue));
+    crypto_wipe(receiveKeyValue, sizeof(receiveKeyValue));
+    initialized = false;
+    sendIndex = 0;
+    receiveIndex = 0;
+    sendCounter = 0;
+    replay = ReplayWindow64();
+}
+
 void SecureTransport::initialize(uint32_t peer, uint32_t local,
                                  const uint8_t sendKey[32],
                                  const uint8_t receiveKey[32])

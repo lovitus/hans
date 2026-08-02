@@ -102,6 +102,7 @@ public:
 
     SecureTransport();
     ~SecureTransport();
+    void reset();
     void initialize(uint32_t sendIndex, uint32_t receiveIndex,
                     const uint8_t sendKey[32], const uint8_t receiveKey[32]);
     bool ready() const { return initialized; }

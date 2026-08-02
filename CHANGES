@@ -26,6 +26,9 @@ Release 1.5 (August 2026)
   per-peer gap/late/duplicate telemetry, and briefly reorder only inner data
   after a late packet proves the path reorders; loss-only and normal paths
   remain zero-copy and do not incur reorder delay
+* Recover encrypted v4 clients after a server restart or expired server-side
+  session using authenticated ICMP heartbeats and a jittered client-initiated
+  handshake; unknown receiver indexes remain silent and expose no reset oracle
 
 Release 1.4 (July 2026)
 -----------------------
