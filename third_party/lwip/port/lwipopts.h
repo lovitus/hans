@@ -68,6 +68,22 @@
 #define LWIP_TCP_KEEPALIVE              1
 #define LWIP_NETIF_TX_SINGLE_PBUF       0
 
+/* Use a finer TCP timer so isolated loss is recovered without waiting for
+ * lwIP's default 500 ms slow tick. Keep an independent RTO floor: a one-tick
+ * (100 ms) timeout is too aggressive on normal Internet paths with jitter. */
+#ifndef HANS_TCP_TIMER_INTERVAL_MS
+#define HANS_TCP_TIMER_INTERVAL_MS      50
+#endif
+#ifndef HANS_TCP_MIN_RTO_MS
+#define HANS_TCP_MIN_RTO_MS             400
+#endif
+#define TCP_TMR_INTERVAL                HANS_TCP_TIMER_INTERVAL_MS
+#define HANS_TCP_MIN_RTO_TICKS          \
+    ((HANS_TCP_MIN_RTO_MS + (2 * TCP_TMR_INTERVAL) - 1) / \
+     (2 * TCP_TMR_INTERVAL))
+#define HANS_TCP_CLAMP_RTO_TICKS(ticks) \
+    ((s16_t)LWIP_MAX(HANS_TCP_MIN_RTO_TICKS, (ticks)))
+
 /* One port-zero listener is an on-demand fallback for Hans --allports. */
 #define HANS_TCP_WILDCARD_LISTENER      1
 

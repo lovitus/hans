@@ -2,6 +2,7 @@
 
 extern "C" {
 #include "lwip/opt.h"
+#include "lwip/priv/tcp_priv.h"
 }
 
 #include <arpa/inet.h>
@@ -34,6 +35,19 @@ int main()
            "send queue can hold the configured send buffer");
     expect((TCP_WND >> TCP_RCV_SCALE) <= 65535,
            "scaled receive window fits the TCP option");
+    expect(TCP_SLOW_INTERVAL <= 200,
+           "TCP loss detection uses a fine-grained slow timer");
+    expect(HANS_TCP_MIN_RTO_TICKS * TCP_SLOW_INTERVAL >=
+           HANS_TCP_MIN_RTO_MS,
+           "TCP retransmission timeout floor is rounded up");
+    expect(HANS_TCP_MIN_RTO_TICKS * TCP_SLOW_INTERVAL <
+           HANS_TCP_MIN_RTO_MS + TCP_SLOW_INTERVAL,
+           "TCP retransmission timeout floor is tightly rounded");
+    expect(HANS_TCP_CLAMP_RTO_TICKS(1) == HANS_TCP_MIN_RTO_TICKS,
+           "TCP retransmission timeout floor clamps short estimates");
+    expect(HANS_TCP_CLAMP_RTO_TICKS(HANS_TCP_MIN_RTO_TICKS + 1) ==
+           HANS_TCP_MIN_RTO_TICKS + 1,
+           "TCP retransmission timeout floor preserves safe estimates");
 
     std::vector<SharePort> ports;
     std::string error;

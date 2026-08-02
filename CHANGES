@@ -20,6 +20,8 @@ Release 1.5 (August 2026)
 * Raise the userspace TCP send and receive windows for high-bandwidth,
   higher-latency VPN paths to 6 MiB and 8 MiB respectively instead of capping
   throughput at one small window per round trip
+* Improve userspace TCP loss recovery with a finer lwIP timer while retaining
+  a conservative 400 ms retransmission floor for jittery Internet paths
 * Use conventional sequential ICMP echo tokens for current sessions, add
   per-peer gap/late/duplicate telemetry, and briefly reorder only inner data
   after a late packet proves the path reorders; loss-only and normal paths

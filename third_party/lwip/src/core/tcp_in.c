@@ -1277,7 +1277,7 @@ tcp_receive(struct tcp_pcb *pcb)
       pcb->nrtx = 0;
 
       /* Reset the retransmission time-out. */
-      pcb->rto = (s16_t)((pcb->sa >> 3) + pcb->sv);
+      pcb->rto = HANS_TCP_CLAMP_RTO_TICKS((pcb->sa >> 3) + pcb->sv);
 
       /* Record how much data this ACK acks */
       acked = (tcpwnd_size_t)(ackno - pcb->lastack);
@@ -1392,7 +1392,7 @@ tcp_receive(struct tcp_pcb *pcb)
       }
       m = (s16_t)(m - (pcb->sv >> 2));
       pcb->sv = (s16_t)(pcb->sv + m);
-      pcb->rto = (s16_t)((pcb->sa >> 3) + pcb->sv);
+      pcb->rto = HANS_TCP_CLAMP_RTO_TICKS((pcb->sa >> 3) + pcb->sv);
 
       LWIP_DEBUGF(TCP_RTO_DEBUG, ("tcp_receive: RTO %"U16_F" (%"U16_F" milliseconds)\n",
                                   pcb->rto, (u16_t)(pcb->rto * TCP_SLOW_INTERVAL)));

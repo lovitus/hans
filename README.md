@@ -282,6 +282,12 @@ paths with tens of milliseconds of latency, where a traditional 64 KiB send
 buffer otherwise limits a single TCP stream even when the ICMP carrier has
 substantial spare capacity.
 
+The userspace TCP timer runs at 50 ms resolution so an isolated loss is not
+forced to wait for lwIP's default 500 ms slow tick. Its retransmission timeout
+still has a separate 400 ms floor: timer resolution and timeout policy are not
+the same setting, and the conservative floor avoids aggressive retransmission
+on Internet paths with ordinary latency variation.
+
 The SOCKS listener defaults to `127.0.0.1`. For a shared listener, enable
 dependency-free RFC 1929 authentication and keep the password off the command
 line:

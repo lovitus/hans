@@ -1291,7 +1291,7 @@ tcp_slowtmr_start:
             if (pcb->state != SYN_SENT) {
               u8_t backoff_idx = LWIP_MIN(pcb->nrtx, sizeof(tcp_backoff) - 1);
               int calc_rto = ((pcb->sa >> 3) + pcb->sv) << tcp_backoff[backoff_idx];
-              pcb->rto = (s16_t)LWIP_MIN(calc_rto, 0x7FFF);
+              pcb->rto = HANS_TCP_CLAMP_RTO_TICKS(LWIP_MIN(calc_rto, 0x7FFF));
             }
 
             /* Reset the retransmission timer. */
@@ -1904,7 +1904,7 @@ tcp_alloc(u8_t prio)
     pcb->mss = INITIAL_MSS;
     /* Set initial TCP's retransmission timeout to 3000 ms by default.
        This value could be configured in lwipopts */
-    pcb->rto = LWIP_TCP_RTO_TIME / TCP_SLOW_INTERVAL;
+    pcb->rto = HANS_TCP_CLAMP_RTO_TICKS(LWIP_TCP_RTO_TIME / TCP_SLOW_INTERVAL);
     pcb->sv = LWIP_TCP_RTO_TIME / TCP_SLOW_INTERVAL;
     pcb->rtime = -1;
     pcb->cwnd = 1;
