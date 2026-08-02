@@ -66,6 +66,22 @@ while [ "$attempt" -gt 0 ]; do
     attempt=$((attempt - 1))
 done
 ip -n "$client_ns" -4 addr show | grep -q '10.91.0.100/24'
+# Address assignment precedes the adaptive direct-reply probe.  Do not make
+# the data-plane assertion while that probe can still switch modes: a
+# namespace/veth path may accept the probe burst and then reject sustained
+# direct replies, in which case Hans deliberately falls back after its first
+# transport heartbeat.  Waiting here tests the settled direct or credit mode
+# instead of treating the designed transition as IPv6 packet loss.
+attempt=40
+while [ "$attempt" -gt 0 ]; do
+    grep -q -e 'direct reply mode enabled' \
+        -e 'keeping adaptive poll credits' "$work/client.log" && break
+    kill -0 "$server_pid"
+    kill -0 "$client_pid"
+    sleep 0.25
+    attempt=$((attempt - 1))
+done
+sleep 6
 ip netns exec "$client_ns" ping -c 5 -W 2 10.91.0.1
 grep -q 'secure protocol v5 connection established to 2001:db8:44::2' \
     "$work/server.log"
