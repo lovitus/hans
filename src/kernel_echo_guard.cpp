@@ -15,7 +15,8 @@ KernelEchoGuard::KernelEchoGuard(const char *path)
         path = "/proc/sys/net/ipv4/icmp_echo_ignore_all";
 #endif
     // Open before Server may drop privileges. Merely opening the procfs knob
-    // does not change it; a Windows-helper handshake activates it lazily.
+    // does not change it; a credit-mode or Windows-helper session activates
+    // it lazily.
     if (path != 0)
         fd = open(path, O_RDWR);
 }
@@ -75,7 +76,7 @@ bool KernelEchoGuard::suppress()
     }
     if (!readValue(originalValue))
     {
-        syslog(LOG_WARNING, "Windows userspace client detected, but runtime kernel echo suppression is unavailable: %s",
+        syslog(LOG_WARNING, "tunnel transport requires runtime kernel echo suppression, but it is unavailable: %s",
                fd == -1 ? "not a Linux procfs server or insufficient startup privileges" :
                           strerror(errno));
         return false;
@@ -84,7 +85,7 @@ bool KernelEchoGuard::suppress()
     {
         if (!writeValue(1))
         {
-            syslog(LOG_WARNING, "Windows userspace client detected, but kernel echo replies could not be suppressed: %s",
+            syslog(LOG_WARNING, "tunnel transport requires kernel echo suppression, but it could not be enabled: %s",
                    strerror(errno));
             return false;
         }
@@ -92,7 +93,7 @@ bool KernelEchoGuard::suppress()
     }
     active = true;
     users = 1;
-    syslog(LOG_INFO, "temporarily suppressed kernel ICMP echo replies for Windows userspace clients");
+    syslog(LOG_INFO, "temporarily suppressed kernel ICMP echo replies for tunnel transport");
     return true;
 }
 

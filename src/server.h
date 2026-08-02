@@ -214,6 +214,8 @@ protected:
     void processTransportAck(ClientData *client,
                              const TransportV3::Header &transport);
     bool directPathFailed(ClientData *client) const;
+    bool needsKernelEchoSuppression(const ClientData *client) const;
+    void syncKernelEchoSuppression(ClientData *client);
 
     void pollReceived(ClientData *client, uint16_t echoId, uint16_t echoSeq,
                       bool servePending);

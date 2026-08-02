@@ -220,6 +220,7 @@ jobs:
               ip -n hans-server link set under-server up
               ip -n hans-client link set under-client up
               ip netns exec hans-server tc qdisc add dev under-server root netem delay 20ms
+              echo_guard_before=$(ip netns exec hans-server cat /proc/sys/net/ipv4/icmp_echo_ignore_all)
 
               # Server-side --require-v4 accepts v4/v5 but must silently drop
               # an unencrypted v2 request. Ignore the ordinary kernel echo of
@@ -373,6 +374,12 @@ jobs:
               done
               [ "$upgraded" -eq 1 ]
               ip netns exec hans-client ping -c 3 -W 2 10.66.77.1
+              # Credit mode must own the only kernel echo reply, but the
+              # namespace-wide setting must be reference-counted and restored
+              # after each direct-mode upgrade.
+              [ "$(grep -c temporarily.suppressed.kernel.ICMP.echo.replies /tmp/hans-server.log)" -ge 2 ]
+              [ "$(grep -c restored.kernel.ICMP.echo.reply.setting /tmp/hans-server.log)" -ge 2 ]
+              [ "$(ip netns exec hans-server cat /proc/sys/net/ipv4/icmp_echo_ignore_all)" = "$echo_guard_before" ]
 
               # Reconnect from the same real IP in fixed direct mode before
               # the old server-side session expires. This exercises session

@@ -562,23 +562,7 @@ void Server::completeSecureHandshake(ClientData *client,
     }
     if (!client->autoPoll && client->maxPolls == 0)
         client->transportMode = TransportV3::MODE_DIRECT;
-    const bool usesWindowsHelper =
-        (connectData.capabilities & TransportV3::CAP_WINDOWS_ICMP_HELPER) != 0;
-    if (usesWindowsHelper && client->kernelEchoFamily == AF_UNSPEC)
-    {
-        KernelEchoGuard &guard = client->realAddress.family() == AF_INET6 ?
-                                 kernelEchoGuard6 : kernelEchoGuard;
-        if (guard.suppress())
-            client->kernelEchoFamily = client->realAddress.family();
-    }
-    else if (!usesWindowsHelper && client->kernelEchoFamily != AF_UNSPEC)
-    {
-        if (client->kernelEchoFamily == AF_INET6)
-            kernelEchoGuard6.release();
-        else
-            kernelEchoGuard.release();
-        client->kernelEchoFamily = AF_UNSPEC;
-    }
+    syncKernelEchoSuppression(client);
 
     ClientData *oldClient = getClientByDeviceId(client->deviceId, client);
     if (oldClient != NULL)
@@ -664,6 +648,7 @@ void Server::checkChallenge(ClientData *client, int length)
         accept[10] = 0;
         accept[11] = 0;
         acceptLength = 12;
+        syncKernelEchoSuppression(client);
     }
 
     sendEchoToClient(client, TunnelHeader::TYPE_CONNECTION_ACCEPT, acceptLength);
@@ -746,6 +731,7 @@ bool Server::handleSecureClientPacket(ClientData *client,
                     while (!client->pollIds.empty()) client->pollIds.pop();
                 else
                     client->directUnacked.clear();
+                syncKernelEchoSuppression(client);
                 echoSendPayloadBuffer()[0] = client->transportMode;
                 sendV3ToClient(client, TunnelHeader::TYPE_MODE_ACK, 1,
                                TransportV3::FLAG_CONTROL, true, id, seq);
@@ -761,6 +747,7 @@ bool Server::handleSecureClientPacket(ClientData *client,
             {
                 client->transportMode = TransportV3::MODE_CREDIT;
                 client->directUnacked.clear();
+                syncKernelEchoSuppression(client);
                 syslog(LOG_WARNING, "direct reply acknowledgements stalled for %s; falling back to adaptive credits",
                        realAddress.format().c_str());
                 echoSendPayloadBuffer()[0] = TransportV3::MODE_CREDIT;
@@ -979,6 +966,7 @@ bool Server::handleEchoData(const TunnelHeader &header, int dataLength,
 
                 if (client->transportMode == TransportV3::MODE_CREDIT)
                     client->directUnacked.clear();
+                syncKernelEchoSuppression(client);
                 echoSendPayloadBuffer()[0] = client->transportMode;
                 sendV3ToClient(client, TunnelHeader::TYPE_MODE_ACK, 1,
                                TransportV3::FLAG_CONTROL, true, id, seq);
@@ -998,6 +986,7 @@ bool Server::handleEchoData(const TunnelHeader &header, int dataLength,
                 {
                     client->transportMode = TransportV3::MODE_CREDIT;
                     client->directUnacked.clear();
+                    syncKernelEchoSuppression(client);
                     syslog(LOG_WARNING, "direct reply acknowledgements stalled for %s; falling back to adaptive credits",
                            Utility::formatIp(realIp).c_str());
                     echoSendPayloadBuffer()[0] = TransportV3::MODE_CREDIT;
@@ -1535,6 +1524,37 @@ bool Server::directPathFailed(ClientData *client) const
     return client->directUnacked.failed(now.milliseconds(),
                                         DIRECT_UNACKED_LIMIT,
                                         DIRECT_ACK_TIMEOUT_MS);
+}
+
+bool Server::needsKernelEchoSuppression(const ClientData *client) const
+{
+    const bool usesWindowsHelper =
+        (client->capabilities & TransportV3::CAP_WINDOWS_ICMP_HELPER) != 0;
+    const bool usesReplyCredits = client->protocolVersion >= 3 &&
+        client->transportMode == TransportV3::MODE_CREDIT;
+    return usesWindowsHelper || usesReplyCredits;
+}
+
+void Server::syncKernelEchoSuppression(ClientData *client)
+{
+    int desiredFamily = needsKernelEchoSuppression(client) ?
+                        client->realAddress.family() : AF_UNSPEC;
+    if (client->kernelEchoFamily == desiredFamily)
+        return;
+
+    if (client->kernelEchoFamily == AF_INET6)
+        kernelEchoGuard6.release();
+    else if (client->kernelEchoFamily == AF_INET)
+        kernelEchoGuard.release();
+    client->kernelEchoFamily = AF_UNSPEC;
+
+    if (desiredFamily == AF_INET || desiredFamily == AF_INET6)
+    {
+        KernelEchoGuard &guard = desiredFamily == AF_INET6 ?
+                                 kernelEchoGuard6 : kernelEchoGuard;
+        if (guard.suppress())
+            client->kernelEchoFamily = desiredFamily;
+    }
 }
 
 void Server::releaseTunnelIp(uint32_t tunnelIp, const string &deviceId)
