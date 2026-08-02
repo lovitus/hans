@@ -1116,7 +1116,9 @@ jobs:
     name: Publish release
     # Do not replace the continuous release with a partial artifact set when
     # any required build or isolated-package test failed.
-    if: github.event_name != 'pull_request'
+    # A manual dispatch is a validation run and may target a feature branch;
+    # only repository pushes are allowed to mutate the rolling/formal release.
+    if: github.event_name == 'push'
     needs:
       - build-linux-native
       - build-linux-emulated
