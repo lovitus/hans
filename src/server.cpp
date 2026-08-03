@@ -150,6 +150,7 @@ void Server::handleUnknownClient(const TunnelHeader &header, int dataLength, uin
                              (header.magic == Client::v2Magic ? 2 : 1);
     client.capabilities = 0;
     client.autoPoll = false;
+    client.windowsIcmpHelper = false;
     client.kernelEchoFamily = AF_UNSPEC;
     client.transportMode = TransportV3::MODE_CREDIT;
     client.sessionId = 0;
@@ -161,7 +162,7 @@ void Server::handleUnknownClient(const TunnelHeader &header, int dataLength, uin
     client.backlogHint = 0;
     client.state = ClientData::STATE_NEW;
 
-    pollReceived(&client, echoId, echoSeq, false);
+    pollReceived(&client, echoId, echoSeq, false, true);
 
     if (header.type != TunnelHeader::TYPE_CONNECTION_REQUEST ||
         (client.protocolVersion == 3 && dataLength != sizeof(ClientConnectDataV3)) ||
@@ -200,6 +201,9 @@ void Server::handleUnknownClient(const TunnelHeader &header, int dataLength, uin
     {
         ClientConnectDataV3 *connectDataV3 =
             (ClientConnectDataV3 *)echoReceivePayloadBuffer();
+        client.windowsIcmpHelper =
+            (connectDataV3->capabilities &
+             TransportV3::CAP_WINDOWS_ICMP_HELPER) != 0;
         client.capabilities = connectDataV3->capabilities &
                               TransportV3::ALL_CAPABILITIES;
         client.autoPoll =
@@ -229,8 +233,7 @@ void Server::handleUnknownClient(const TunnelHeader &header, int dataLength, uin
 
     if (client.tunnelIp != 0 || replacingDevice)
     {
-        if ((client.capabilities & TransportV3::CAP_WINDOWS_ICMP_HELPER) != 0 &&
-            kernelEchoGuard.suppress())
+        if (client.windowsIcmpHelper && kernelEchoGuard.suppress())
             client.kernelEchoFamily = AF_INET;
         client.challenge = auth.generateChallenge(CHALLENGE_SIZE);
         sendChallenge(&client);
@@ -335,6 +338,7 @@ void Server::handleV4HandshakeInit(const TunnelHeader &, int dataLength,
     client.protocolVersion = 4;
     client.capabilities = 0;
     client.autoPoll = false;
+    client.windowsIcmpHelper = windowsHelperHint;
     client.kernelEchoFamily = AF_UNSPEC;
     client.transportMode = TransportV3::MODE_CREDIT;
     client.sessionId = 0;
@@ -356,7 +360,7 @@ void Server::handleV4HandshakeInit(const TunnelHeader &, int dataLength,
         delete client.secureHandshake;
         return;
     }
-    pollReceived(&client, echoId, echoSeq, false);
+    pollReceived(&client, echoId, echoSeq, false, true);
     std::vector<uint8_t> response;
     if (!client.secureHandshake->writeMessage2(response))
     {
@@ -447,6 +451,8 @@ void Server::handleV5HandshakeInit(const std::vector<uint8_t> &plain,
     client.protocolVersion = 5;
     client.capabilities = 0;
     client.autoPoll = false;
+    client.windowsIcmpHelper =
+        (plain[1] & TransportV3::CAP_WINDOWS_ICMP_HELPER) != 0;
     client.kernelEchoFamily = AF_UNSPEC;
     client.transportMode = TransportV3::MODE_CREDIT;
     client.sessionId = 0;
@@ -467,7 +473,7 @@ void Server::handleV5HandshakeInit(const std::vector<uint8_t> &plain,
         delete client.secureHandshake;
         return;
     }
-    pollReceived(&client, echoId, echoSeq, false);
+    pollReceived(&client, echoId, echoSeq, false, true);
     std::vector<uint8_t> response;
     if (!client.secureHandshake->writeMessage2(response))
     {
@@ -564,6 +570,7 @@ void Server::completeSecureHandshake(ClientData *client,
         client->transportMode = TransportV3::MODE_DIRECT;
     const bool usesWindowsHelper =
         (connectData.capabilities & TransportV3::CAP_WINDOWS_ICMP_HELPER) != 0;
+    client->windowsIcmpHelper = usesWindowsHelper;
     if (usesWindowsHelper && client->kernelEchoFamily == AF_UNSPEC)
     {
         KernelEchoGuard &guard = client->realAddress.family() == AF_INET6 ?
@@ -598,7 +605,7 @@ void Server::completeSecureHandshake(ClientData *client,
                                        client->secureHandshake->receiveKey());
     delete client->secureHandshake;
     client->secureHandshake = NULL;
-    pollReceived(client, echoId, echoSeq, false);
+    pollReceived(client, echoId, echoSeq, false, true);
 
     char accept[12];
     put32(accept, client->tunnelIp);
@@ -714,7 +721,10 @@ bool Server::handleSecureClientPacket(ClientData *client,
     bool isControl = type == TunnelHeader::TYPE_DIRECT_PROBE ||
                      type == TunnelHeader::TYPE_MODE_SET ||
                      type == TunnelHeader::TYPE_TRANSPORT_PING;
-    pollReceived(client, id, seq, !isControl);
+    const bool windowsHelperData = TransportV3::requiresImmediateReply(
+        client->windowsIcmpHelper, isData);
+    pollReceived(client, id, seq, !isControl && !windowsHelperData,
+                 !windowsHelperData);
 
     switch (type)
     {
@@ -726,6 +736,8 @@ bool Server::handleSecureClientPacket(ClientData *client,
                     echoReceivePayloadBuffer() + TransportV3::HEADER_SIZE,
                     dataLength);
             deliverReorderedPackets(client, reorderedPackets);
+            if (windowsHelperData)
+                replyToWindowsHelperRequest(client, id, seq);
             return true;
         case TunnelHeader::TYPE_POLL:
             return true;
@@ -898,8 +910,15 @@ bool Server::handleEchoData(const TunnelHeader &header, int dataLength,
                      header.type == TunnelHeader::TYPE_DIRECT_PROBE ||
                      header.type == TunnelHeader::TYPE_MODE_SET ||
                      header.type == TunnelHeader::TYPE_TRANSPORT_PING;
+    const bool windowsHelperData =
+        client->state == ClientData::STATE_ESTABLISHED &&
+        TransportV3::requiresImmediateReply(
+            client->windowsIcmpHelper,
+            header.type == TunnelHeader::TYPE_DATA);
     pollReceived(client, id, seq,
-                 client->state == ClientData::STATE_ESTABLISHED && !isControl);
+                 client->state == ClientData::STATE_ESTABLISHED &&
+                 !isControl && !windowsHelperData,
+                 !windowsHelperData);
 
     switch (header.type)
     {
@@ -930,6 +949,8 @@ bool Server::handleEchoData(const TunnelHeader &header, int dataLength,
                 if (dataLength == 0)
                 {
                     syslog(LOG_WARNING, "received empty data packet");
+                    if (windowsHelperData)
+                        replyToWindowsHelperRequest(client, id, seq);
                     return true;
                 }
 
@@ -947,6 +968,8 @@ bool Server::handleEchoData(const TunnelHeader &header, int dataLength,
                 else
                     handleClientData(client, echoReceivePayloadBuffer(),
                                      dataLength);
+                if (windowsHelperData)
+                    replyToWindowsHelperRequest(client, id, seq);
                 return true;
             }
             break;
@@ -1166,15 +1189,16 @@ void Server::handleTunData(int dataLength, uint32_t, uint32_t destIp)
 }
 
 void Server::pollReceived(ClientData *client, uint16_t echoId, uint16_t echoSeq,
-                          bool servePending)
+                          bool servePending, bool retainCredit)
 {
     unsigned int maxSavedPolls = client->maxPolls != 0 ? client->maxPolls : 1;
 
     client->lastEcho = ClientData::EchoId(echoId, echoSeq);
     client->haveLastEcho = true;
 
-    if (client->transportMode == TransportV3::MODE_CREDIT ||
-        client->protocolVersion < 3)
+    if (retainCredit &&
+        (client->transportMode == TransportV3::MODE_CREDIT ||
+         client->protocolVersion < 3))
     {
         client->pollIds.push(ClientData::EchoId(echoId, echoSeq));
         if (client->pollIds.size() > maxSavedPolls)
@@ -1209,6 +1233,30 @@ void Server::pollReceived(ClientData *client, uint16_t echoId, uint16_t echoSeq,
             lease->second.realAddressText = client->realAddress.format();
         }
     }
+}
+
+void Server::replyToWindowsHelperRequest(ClientData *client,
+                                         uint16_t echoId, uint16_t echoSeq)
+{
+    if (!client->pendingPackets.empty())
+    {
+        client->backlogHint = client->pendingPackets.size();
+        Packet &packet = client->pendingPackets.front();
+        const TunnelHeader::Type packetType = packet.type;
+        const int packetLength = packet.data.size();
+        if (packetLength > 0)
+            memcpy(echoSendPayloadBuffer(), &packet.data[0], packetLength);
+        client->pendingPackets.pop();
+        sendV3ToClient(client, packetType, packetLength,
+                       TransportV3::FLAG_NONE, true, echoId, echoSeq);
+        return;
+    }
+
+    /* IcmpSendEcho2 owns one asynchronous slot until each request receives a
+     * reply or times out. A small authenticated ACK prevents data-carrying
+     * requests from filling every Windows helper slot for the full timeout. */
+    sendV3ToClient(client, TunnelHeader::TYPE_TRANSPORT_PING, 0,
+                   TransportV3::FLAG_CONTROL, true, echoId, echoSeq);
 }
 
 void Server::sendEchoToClient(ClientData *client, TunnelHeader::Type type, int dataLength)

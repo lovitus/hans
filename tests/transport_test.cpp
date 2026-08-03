@@ -195,6 +195,26 @@ static void testWindowsCreditLifetime()
     assert(WINDOWS_ICMP_MAX_CREDITS * 2 <= WINDOWS_ICMP_MAX_PENDING);
     assert((TransportV3::ALL_CAPABILITIES &
             TransportV3::CAP_WINDOWS_ICMP_HELPER) == 0);
+
+    uint8_t normal = TransportV3::advertisedCapabilities(true, false);
+    assert((normal & TransportV3::CAP_DIRECT_REPLY) != 0);
+    assert((normal & TransportV3::CAP_WINDOWS_ICMP_HELPER) == 0);
+
+    uint8_t helper = TransportV3::advertisedCapabilities(true, true);
+    assert((helper & TransportV3::CAP_ADAPTIVE_CREDIT) != 0);
+    assert((helper & TransportV3::CAP_SEQUENCE_ACK) != 0);
+    assert((helper & TransportV3::CAP_WINDOWS_ICMP_HELPER) != 0);
+    assert((helper & TransportV3::CAP_DIRECT_REPLY) == 0);
+
+    uint8_t fixedHelper = TransportV3::advertisedCapabilities(false, true);
+    assert((fixedHelper & TransportV3::CAP_SEQUENCE_ACK) != 0);
+    assert((fixedHelper & TransportV3::CAP_WINDOWS_ICMP_HELPER) != 0);
+    assert((fixedHelper & TransportV3::CAP_ADAPTIVE_CREDIT) == 0);
+    assert((fixedHelper & TransportV3::CAP_DIRECT_REPLY) == 0);
+
+    assert(TransportV3::requiresImmediateReply(true, true));
+    assert(!TransportV3::requiresImmediateReply(true, false));
+    assert(!TransportV3::requiresImmediateReply(false, true));
 }
 
 static void testDirectAckTracker()

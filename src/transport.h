@@ -66,6 +66,10 @@ public:
     static bool acknowledged(uint32_t sequence, uint32_t ackSequence,
                              uint32_t ackBits);
     static void advanceEchoToken(uint16_t &id, uint16_t &sequence);
+    static uint8_t advertisedCapabilities(bool adaptive,
+                                          bool windowsIcmpHelper);
+    static bool requiresImmediateReply(bool windowsIcmpHelper,
+                                       bool dataPacket);
 };
 
 class SequenceTracker

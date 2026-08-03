@@ -61,6 +61,27 @@ TransportV3::Header::Header()
     timestamp = 0;
 }
 
+uint8_t TransportV3::advertisedCapabilities(bool adaptive,
+                                             bool windowsIcmpHelper)
+{
+    uint8_t capabilities = adaptive ? ALL_CAPABILITIES : CAP_SEQUENCE_ACK;
+    if (windowsIcmpHelper)
+    {
+        /* IcmpSendEcho2 only delivers replies associated with live requests.
+         * A few overlapping credit requests can make the direct probe pass,
+         * but they expire and cannot sustain unsolicited server traffic. */
+        capabilities &= (uint8_t)~CAP_DIRECT_REPLY;
+        capabilities |= CAP_WINDOWS_ICMP_HELPER;
+    }
+    return capabilities;
+}
+
+bool TransportV3::requiresImmediateReply(bool windowsIcmpHelper,
+                                         bool dataPacket)
+{
+    return windowsIcmpHelper && dataPacket;
+}
+
 void TransportV3::encode(char *buffer, const Header &header)
 {
     memset(buffer, 0, HEADER_SIZE);

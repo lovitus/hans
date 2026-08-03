@@ -106,6 +106,7 @@ protected:
         int protocolVersion;
         int capabilities;
         bool autoPoll;
+        bool windowsIcmpHelper;
         int kernelEchoFamily;
         uint8_t transportMode;
         uint32_t sessionId;
@@ -216,7 +217,9 @@ protected:
     bool directPathFailed(ClientData *client) const;
 
     void pollReceived(ClientData *client, uint16_t echoId, uint16_t echoSeq,
-                      bool servePending);
+                      bool servePending, bool retainCredit);
+    void replyToWindowsHelperRequest(ClientData *client, uint16_t echoId,
+                                     uint16_t echoSeq);
 
     uint32_t reserveTunnelIp(uint32_t desiredIp, const std::string &deviceId);
     void releaseTunnelIp(uint32_t tunnelIp, const std::string &deviceId);

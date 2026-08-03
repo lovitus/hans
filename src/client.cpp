@@ -235,12 +235,12 @@ void Client::sendConnectionRequest()
         connectData->v2.legacy.maxPolls = autoPoll ? adaptiveCredit.target() : maxPolls;
         connectData->v2.legacy.desiredIp = desiredIp;
         memcpy(connectData->v2.deviceId, deviceId.data(), DEVICE_ID_HEX_SIZE);
-        connectData->capabilities = autoPoll ? TransportV3::ALL_CAPABILITIES :
-                                              TransportV3::CAP_SEQUENCE_ACK;
+        bool windowsIcmpHelper = false;
 #ifdef WIN32
-        if (userspaceNetwork != NULL)
-            connectData->capabilities |= TransportV3::CAP_WINDOWS_ICMP_HELPER;
+        windowsIcmpHelper = userspaceNetwork != NULL;
 #endif
+        connectData->capabilities = TransportV3::advertisedCapabilities(
+            autoPoll, windowsIcmpHelper);
         connectData->minimumPolls = 2;
         connectData->maximumPolls = 128;
         sendEchoToServer(TunnelHeader::TYPE_CONNECTION_REQUEST,
@@ -273,12 +273,12 @@ void Client::sendV4HandshakeFinish()
     connectData.v2.legacy.maxPolls = autoPoll ? adaptiveCredit.target() : maxPolls;
     connectData.v2.legacy.desiredIp = desiredIp;
     memcpy(connectData.v2.deviceId, deviceId.data(), DEVICE_ID_HEX_SIZE);
-    connectData.capabilities = autoPoll ? TransportV3::ALL_CAPABILITIES :
-                                         TransportV3::CAP_SEQUENCE_ACK;
+    bool windowsIcmpHelper = false;
 #ifdef WIN32
-    if (userspaceNetwork != NULL)
-        connectData.capabilities |= TransportV3::CAP_WINDOWS_ICMP_HELPER;
+    windowsIcmpHelper = userspaceNetwork != NULL;
 #endif
+    connectData.capabilities = TransportV3::advertisedCapabilities(
+        autoPoll, windowsIcmpHelper);
     connectData.minimumPolls = 2;
     connectData.maximumPolls = 128;
     uint8_t metadata[sizeof(connectData) + 2];
@@ -307,12 +307,12 @@ void Client::sendV5HandshakeFinish()
     connectData.v2.legacy.maxPolls = autoPoll ? adaptiveCredit.target() : maxPolls;
     connectData.v2.legacy.desiredIp = desiredIp;
     memcpy(connectData.v2.deviceId, deviceId.data(), DEVICE_ID_HEX_SIZE);
-    connectData.capabilities = autoPoll ? TransportV3::ALL_CAPABILITIES :
-                                         TransportV3::CAP_SEQUENCE_ACK;
+    bool windowsIcmpHelper = false;
 #ifdef WIN32
-    if (userspaceNetwork != NULL)
-        connectData.capabilities |= TransportV3::CAP_WINDOWS_ICMP_HELPER;
+    windowsIcmpHelper = userspaceNetwork != NULL;
 #endif
+    connectData.capabilities = TransportV3::advertisedCapabilities(
+        autoPoll, windowsIcmpHelper);
     connectData.minimumPolls = 2;
     connectData.maximumPolls = 128;
     uint8_t metadata[sizeof(connectData) + 2];
