@@ -33,6 +33,12 @@ ip link set "v6a$suffix" netns "$server_ns"
 ip link set "v6b$suffix" netns "$client_ns"
 ip link set "v4a$suffix" netns "$server_ns"
 ip link set "v4b$suffix" netns "$client_ns"
+# Keep source-address selection deterministic.  Recent kernels may create and
+# prefer an automatic link-local address on a veth even though this test
+# explicitly configures ULAs below, making the functional tunnel pass while
+# the authenticated-address assertions observe a random fe80:: address.
+ip -n "$server_ns" link set "v6a$suffix" addrgenmode none
+ip -n "$client_ns" link set "v6b$suffix" addrgenmode none
 ip -n "$server_ns" link set lo up
 ip -n "$client_ns" link set lo up
 ip -n "$server_ns" -6 addr add fd44:4841:4e53::1/64 dev "v6a$suffix"
