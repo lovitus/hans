@@ -211,17 +211,29 @@ public:
     bool receive(std::vector<char> &payload, Echo::Address &address,
                  uint16_t &id, uint16_t &seq)
     {
-        char notification;
-        read(pipeFds[0], &notification, 1);
         pthread_mutex_lock(&mutex);
         if (completed.empty())
         {
             pthread_mutex_unlock(&mutex);
+            // Clear a stale readiness byte if the queue was drained between
+            // select() and this call.
+            char notification;
+            read(pipeFds[0], &notification, 1);
             return false;
         }
         Request *request = completed.front();
         completed.pop_front();
+        bool drained = completed.empty();
         pthread_mutex_unlock(&mutex);
+
+        // One byte represents the whole non-empty completion queue.  Leave it
+        // in the pipe while more replies are ready so select() immediately
+        // dispatches the next one, then consume it with the final reply.
+        if (drained)
+        {
+            char notification;
+            read(pipeFds[0], &notification, 1);
+        }
 
         bool ipv6 = request->address.family() == AF_INET6;
         DWORD replyCount = (ipv6 ? parseReplies6Function : parseRepliesFunction)(
@@ -353,10 +365,14 @@ private:
     void complete(Request *request)
     {
         pthread_mutex_lock(&mutex);
+        bool notify = completed.empty();
         completed.push_back(request);
         pthread_mutex_unlock(&mutex);
-        char notification = 1;
-        write(pipeFds[1], &notification, 1);
+        if (notify)
+        {
+            char notification = 1;
+            write(pipeFds[1], &notification, 1);
+        }
     }
 
     void run()
