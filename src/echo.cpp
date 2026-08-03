@@ -361,6 +361,8 @@ private:
 
     void run()
     {
+        std::vector<HANDLE> handles;
+        handles.reserve(WINDOWS_ICMP_MAX_PENDING + 1);
         while (true)
         {
             pthread_mutex_lock(&mutex);
@@ -370,7 +372,7 @@ private:
                 break;
 
             startQueued();
-            std::vector<HANDLE> handles;
+            handles.clear();
             handles.push_back(wakeEvent);
             for (size_t i = 0; i < active.size(); ++i)
                 handles.push_back(active[i]->event);
