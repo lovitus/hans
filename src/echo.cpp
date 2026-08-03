@@ -90,6 +90,14 @@ public:
         HANDLE event;
     };
 
+    struct Pending
+    {
+        std::vector<char> payload;
+        Echo::Address address;
+        uint16_t id;
+        uint16_t seq;
+    };
+
     typedef HANDLE (WINAPI *CreateFileFunction)(void);
     typedef BOOL (WINAPI *CloseHandleFunction)(HANDLE);
     typedef DWORD (WINAPI *SendEchoFunction)(HANDLE, HANDLE, FARPROC, void *,
@@ -109,7 +117,8 @@ public:
           closeHandleFunction(NULL), sendEchoFunction(NULL),
           parseRepliesFunction(NULL), sendEcho6Function(NULL),
           parseReplies6Function(NULL),
-          replyBufferSize(sizeof(HansIcmp6EchoReply) + maxPayloadSize + 32)
+          replyBufferSize(sizeof(HansIcmp6EchoReply) + maxPayloadSize + 32),
+          requestCount(0)
     {
         pipeFds[0] = pipeFds[1] = -1;
         library = LoadLibraryA("iphlpapi.dll");
@@ -161,9 +170,11 @@ public:
         if (threadStarted)
             pthread_join(thread, NULL);
 
-        clearRequests(queued);
+        clearPending(queued);
+        clearPending(freePending);
         clearRequests(active);
         clearRequests(completed);
+        clearRequests(freeRequests);
         if (pipeFds[0] >= 0)
             close(pipeFds[0]);
         if (pipeFds[1] >= 0)
@@ -187,23 +198,24 @@ public:
     void send(const char *payload, int length, const Echo::Address &address,
               uint16_t id, uint16_t seq)
     {
-        Request *request = new Request;
-        request->payload.assign(payload, payload + length);
-        // A short poll request can carry a full tunnel packet in its reply.
-        // ReplySize therefore has to follow the maximum receive payload, not
-        // the size of this particular request.
-        request->replyBuffer.resize(replyBufferSize);
-        request->address = address;
-        request->id = id;
-        request->seq = seq;
-        request->event = CreateEvent(NULL, FALSE, FALSE, NULL);
-        if (request->event == NULL)
-        {
-            delete request;
-            return;
-        }
         pthread_mutex_lock(&mutex);
-        queued.push_back(request);
+        Pending *pending;
+        if (freePending.empty())
+            pending = new Pending;
+        else
+        {
+            pending = freePending.front();
+            freePending.pop_front();
+        }
+        pthread_mutex_unlock(&mutex);
+
+        pending->payload.assign(payload, payload + length);
+        pending->address = address;
+        pending->id = id;
+        pending->seq = seq;
+
+        pthread_mutex_lock(&mutex);
+        queued.push_back(pending);
         pthread_mutex_unlock(&mutex);
         SetEvent(wakeEvent);
     }
@@ -242,8 +254,7 @@ public:
                 id = request->id;
                 seq = request->seq;
             }
-            CloseHandle(request->event);
-            delete request;
+            recycleRequest(request);
             return valid;
         }
         HansIcmpEchoReply32 *reply = reinterpret_cast<HansIcmpEchoReply32 *>(
@@ -280,8 +291,7 @@ public:
             id = request->id;
             seq = request->seq;
         }
-        CloseHandle(request->event);
-        delete request;
+        recycleRequest(request);
         return valid;
     }
 
@@ -297,14 +307,49 @@ private:
         while (active.size() < WINDOWS_ICMP_MAX_PENDING)
         {
             pthread_mutex_lock(&mutex);
-            if (queued.empty())
+            if (queued.empty() ||
+                (freeRequests.empty() &&
+                 requestCount >= WINDOWS_ICMP_MAX_PENDING * 2))
             {
                 pthread_mutex_unlock(&mutex);
                 break;
             }
-            Request *request = queued.front();
+            Pending *pending = queued.front();
             queued.pop_front();
+            Request *request = NULL;
+            if (!freeRequests.empty())
+            {
+                request = freeRequests.front();
+                freeRequests.pop_front();
+            }
+            else
+                ++requestCount;
             pthread_mutex_unlock(&mutex);
+
+            if (request == NULL)
+            {
+                request = new Request;
+                // A short poll request can carry a full tunnel packet in its
+                // reply, so every reusable slot owns a maximum-sized buffer.
+                request->replyBuffer.resize(replyBufferSize);
+                request->event = CreateEvent(NULL, FALSE, FALSE, NULL);
+                if (request->event == NULL)
+                {
+                    delete request;
+                    pthread_mutex_lock(&mutex);
+                    --requestCount;
+                    queued.push_front(pending);
+                    pthread_mutex_unlock(&mutex);
+                    break;
+                }
+            }
+
+            request->payload.swap(pending->payload);
+            request->address = pending->address;
+            request->id = pending->id;
+            request->seq = pending->seq;
+            recyclePending(pending);
+            ResetEvent(request->event);
 
             DWORD result;
             if (request->address.family() == AF_INET6)
@@ -343,11 +388,27 @@ private:
             else if (GetLastError() == ERROR_IO_PENDING)
                 active.push_back(request);
             else
-            {
-                CloseHandle(request->event);
-                delete request;
-            }
+                recycleRequest(request);
         }
+    }
+
+    void recyclePending(Pending *pending)
+    {
+        pending->payload.clear();
+        pthread_mutex_lock(&mutex);
+        freePending.push_back(pending);
+        pthread_mutex_unlock(&mutex);
+    }
+
+    void recycleRequest(Request *request)
+    {
+        request->payload.clear();
+        pthread_mutex_lock(&mutex);
+        freeRequests.push_back(request);
+        bool wake = !queued.empty();
+        pthread_mutex_unlock(&mutex);
+        if (wake)
+            SetEvent(wakeEvent);
     }
 
     void complete(Request *request)
@@ -403,6 +464,15 @@ private:
         }
     }
 
+    void clearPending(std::deque<Pending *> &requests)
+    {
+        while (!requests.empty())
+        {
+            delete requests.front();
+            requests.pop_front();
+        }
+    }
+
     HMODULE library;
     HANDLE icmpHandle;
     HANDLE icmp6Handle;
@@ -419,9 +489,12 @@ private:
     SendEcho6Function sendEcho6Function;
     ParseRepliesFunction parseReplies6Function;
     size_t replyBufferSize;
-    std::deque<Request *> queued;
+    size_t requestCount;
+    std::deque<Pending *> queued;
+    std::deque<Pending *> freePending;
     std::deque<Request *> active;
     std::deque<Request *> completed;
+    std::deque<Request *> freeRequests;
 };
 #endif
 #include <netinet/in_systm.h>
