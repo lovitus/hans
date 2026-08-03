@@ -220,9 +220,10 @@ public:
         SetEvent(wakeEvent);
     }
 
-    bool receive(std::vector<char> &payload, Echo::Address &address,
-                 uint16_t &id, uint16_t &seq)
+    bool receive(char *payload, size_t payloadCapacity, int &payloadLength,
+                 Echo::Address &address, uint16_t &id, uint16_t &seq)
     {
+        payloadLength = 0;
         char notification;
         read(pipeFds[0], &notification, 1);
         pthread_mutex_lock(&mutex);
@@ -245,11 +246,13 @@ public:
                     &request->replyBuffer[0]);
             bool valid = replyCount > 0 && reply->status == HANS_IP_SUCCESS &&
                 request->replyBuffer.size() >= sizeof(*reply) +
-                                                     request->payload.size();
+                                                     request->payload.size() &&
+                request->payload.size() <= payloadCapacity;
             if (valid)
             {
                 const char *data = &request->replyBuffer[sizeof(*reply)];
-                payload.assign(data, data + request->payload.size());
+                memcpy(payload, data, request->payload.size());
+                payloadLength = (int)request->payload.size();
                 address = request->address;
                 id = request->id;
                 seq = request->seq;
@@ -283,10 +286,11 @@ public:
             dataInBuffer = true;
         }
         bool valid = replyCount > 0 && reply->status == HANS_IP_SUCCESS &&
-                     dataInBuffer;
+                     dataInBuffer && reply->dataSize <= payloadCapacity;
         if (valid)
         {
-            payload.assign(data, data + reply->dataSize);
+            memcpy(payload, data, reply->dataSize);
+            payloadLength = (int)reply->dataSize;
             address = Echo::Address::ipv4(ntohl(reply->address));
             id = request->id;
             seq = request->seq;
@@ -741,14 +745,13 @@ int Echo::receive(int readyFd, Address &address, bool &reply,
 #ifdef WIN32
     if (windowsBackend != NULL)
     {
-        std::vector<char> payload;
-        if (!windowsBackend->receive(payload, address, id, seq))
+        int payloadLength;
+        if (!windowsBackend->receive(
+                receivePayloadBuffer(), receiveBuffer.size() - headerSize(),
+                payloadLength, address, id, seq))
             return -1;
-        if (payload.size() + headerSize() > receiveBuffer.size())
-            return -1;
-        memcpy(receivePayloadBuffer(), &payload[0], payload.size());
         reply = true;
-        return (int)payload.size();
+        return payloadLength;
     }
 #endif
     struct sockaddr_storage source;
