@@ -396,8 +396,12 @@ private:
     {
         pending->payload.clear();
         pthread_mutex_lock(&mutex);
-        freePending.push_back(pending);
+        bool keep = freePending.size() < WINDOWS_ICMP_MAX_PENDING * 2;
+        if (keep)
+            freePending.push_back(pending);
         pthread_mutex_unlock(&mutex);
+        if (!keep)
+            delete pending;
     }
 
     void recycleRequest(Request *request)
