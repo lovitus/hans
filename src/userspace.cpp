@@ -215,6 +215,16 @@ public:
                               const ip4_addr_t *)
     {
         Impl *self = static_cast<Impl *>(netif->state);
+        // lwIP owns the pbuf for the duration of this synchronous callback,
+        // and the observer consumes the bytes before returning.  Most TCP
+        // packets are already contiguous, so avoid copying them through an
+        // intermediate vector.
+        if (p->next == NULL)
+        {
+            self->observer->sendUserspacePacket(
+                static_cast<const char *>(p->payload), p->tot_len);
+            return ERR_OK;
+        }
         if (self->outputBuffer.size() < p->tot_len)
             self->outputBuffer.resize(p->tot_len);
         pbuf_copy_partial(p, &self->outputBuffer[0], p->tot_len, 0);
