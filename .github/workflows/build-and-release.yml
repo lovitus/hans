@@ -496,7 +496,11 @@ jobs:
             label: arm64-qemu
             experimental: false
           - platform: linux/mips64le
-            image: debian:bookworm
+            # Docker Hub's multi-arch debian index has intermittently omitted
+            # mips64le even while the official per-architecture image remains
+            # published. Pin that manifest so the job cannot fail before the
+            # container starts when the shared index is regenerated.
+            image: mips64le/debian:bookworm@sha256:0625f7a69c5cb199afbff9a8666dd0fcd5fe3a2df4a8a42f7ebe4a23cd16fe02
             label: mips64le
             experimental: true
           - platform: linux/ppc64le
