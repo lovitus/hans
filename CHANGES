@@ -8,6 +8,8 @@ Release 1.6.0 (August 2026)
 * Classify duplicate/replayed secure packets separately from authentication
   failures and rate-limit genuine authentication warnings
 * Fix the exact 32-packet ACK bitmap gap boundary without an undefined shift
+* Refresh adaptive echo credits immediately when direct-reply probing fails,
+  avoiding an intermittent one-way stall behind unusable pre-probe tokens
 * Add protocol v5, which pre-authenticates every Noise handshake message with
   a randomized XChaCha20-Poly1305 envelope and encrypts the established
   message type and complete adaptive-transport header; the wire retains only

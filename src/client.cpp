@@ -1089,6 +1089,13 @@ void Client::transportTick()
         {
             syslog(LOG_INFO, "direct reply probe failed; keeping adaptive poll credits");
             directProbePending = false;
+            /* The probe can leave pre-probe echo requests unusable on paths
+             * that accept only one reply for a request token.  They still
+             * occupy the local window, so refresh the complete window now
+             * instead of waiting for CREDIT_REFRESH_MS while server data is
+             * queued behind stale credits. */
+            outstandingPolls.clear();
+            fillPollWindow();
         }
         if (!directProbePending &&
             (lastDirectProbe == Time::ZERO ||
