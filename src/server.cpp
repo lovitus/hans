@@ -587,6 +587,11 @@ void Server::completeSecureHandshake(ClientData *client,
         client->kernelEchoFamily = AF_UNSPEC;
     }
 
+    client->secureTransport.initialize(client->peerReceiverIndex,
+                                       client->localReceiverIndex,
+                                       client->secureHandshake->sendKey(),
+                                       client->secureHandshake->receiveKey());
+
     ClientData *oldClient = getClientByDeviceId(client->deviceId, client);
     if (oldClient != NULL)
     {
@@ -601,6 +606,12 @@ void Server::completeSecureHandshake(ClientData *client,
             syslog(LOG_WARNING,
                    "device %s already has an active session; keeping the existing peer",
                    client->deviceId.c_str());
+            if (client->protocolVersion == 5)
+                sendV5RawToClient(client, TunnelHeader::TYPE_IDENTITY_IN_USE,
+                                  NULL, 0, echoId, echoSeq);
+            else
+                sendV4RawToClient(client, TunnelHeader::TYPE_IDENTITY_IN_USE,
+                                  NULL, 0, echoId, echoSeq);
             removeClient(client);
             return;
         }
@@ -615,10 +626,6 @@ void Server::completeSecureHandshake(ClientData *client,
     clientTunnelIpMap[client->tunnelIp] =
         clientReceiverIndexMap[client->localReceiverIndex];
     client->sessionId = Utility::random32();
-    client->secureTransport.initialize(client->peerReceiverIndex,
-                                       client->localReceiverIndex,
-                                       client->secureHandshake->sendKey(),
-                                       client->secureHandshake->receiveKey());
     delete client->secureHandshake;
     client->secureHandshake = NULL;
     pollReceived(client, echoId, echoSeq, false, true);
@@ -1494,7 +1501,7 @@ bool Server::openV5Packet(ClientData *client, TunnelHeader::Type &type,
         return false;
     uint8_t rawType = packet[0];
     if (rawType < TunnelHeader::TYPE_RESET_CONNECTION ||
-        rawType > TunnelHeader::TYPE_HANDSHAKE_FINISH)
+        rawType > TunnelHeader::TYPE_IDENTITY_IN_USE)
         return false;
     type = (TunnelHeader::Type)rawType;
     dataLength = (int)plainLength - 1;

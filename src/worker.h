@@ -79,7 +79,8 @@ protected:
             TYPE_TRANSPORT_PING = 14,
             TYPE_HANDSHAKE_INIT = 15,
             TYPE_HANDSHAKE_RESPONSE = 16,
-            TYPE_HANDSHAKE_FINISH = 17
+            TYPE_HANDSHAKE_FINISH = 17,
+            TYPE_IDENTITY_IN_USE = 18
         };
 
         Magic magic;

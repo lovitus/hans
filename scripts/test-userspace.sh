@@ -184,6 +184,7 @@ if grep -q "userspace network ready" "$work/duplicate.log"; then
     exit 1
 fi
 grep -q "already has an active session; keeping the existing peer" "$server_log"
+grep -q "device identity is already active; retrying" "$work/duplicate.log"
 ip netns exec "$client_ns" curl --fail --silent --show-error --max-time 20 \
     --socks5-hostname 127.0.0.1:18080 \
     --proxy-user hans:userspace-secret \

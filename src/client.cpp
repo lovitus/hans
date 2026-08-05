@@ -596,6 +596,20 @@ bool Client::handleEchoData(const TunnelHeader &header, int dataLength,
                 throw Exception("password error");
             }
             break;
+        case TunnelHeader::TYPE_IDENTITY_IN_USE:
+            if (state == STATE_CHALLENGE_RESPONSE_SENT &&
+                protocolVersion >= 4)
+            {
+                unsigned int retry = 3000 + Utility::random32() % 2001;
+                syslog(LOG_WARNING,
+                       "device identity is already active; retrying in %u ms",
+                       retry);
+                protocolRequestAttempts = 0;
+                secureTransport.reset();
+                setTimeout(Time((int)retry));
+                return true;
+            }
+            break;
         case TunnelHeader::TYPE_DATA:
             if (state == STATE_ESTABLISHED)
             {
@@ -831,7 +845,7 @@ bool Client::openV5Packet(TunnelHeader::Type &type, int &dataLength)
         return false;
     uint8_t rawType = packet[0];
     if (rawType < TunnelHeader::TYPE_RESET_CONNECTION ||
-        rawType > TunnelHeader::TYPE_HANDSHAKE_FINISH)
+        rawType > TunnelHeader::TYPE_IDENTITY_IN_USE)
         return false;
     type = (TunnelHeader::Type)rawType;
     dataLength = (int)plainLength - 1;
