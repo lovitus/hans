@@ -4,12 +4,14 @@ Release 1.6.0 (August 2026)
   automatically retry with the bundled Wintun backend
 * Prevent concurrent processes using one secure identity from repeatedly
   evicting each other's live session; the active owner keeps its sticky IP and
-  an inactive owner can be replaced after a bounded ownership timeout
+  an inactive owner can be replaced after a bounded ownership timeout, while
+  a per-process encrypted token lets self-reconnect replace a broken session
+  immediately
 * Classify duplicate/replayed secure packets separately from authentication
   failures and rate-limit genuine authentication warnings
 * Fix the exact 32-packet ACK bitmap gap boundary without an undefined shift
-* Refresh adaptive echo credits immediately when direct-reply probing fails,
-  avoiding an intermittent one-way stall behind unusable pre-probe tokens
+* Authenticate established v4/v5 packets before following a server's changed
+  ICMPv6 source address, preserving connectivity on multi-address hosts
 * Add protocol v5, which pre-authenticates every Noise handshake message with
   a randomized XChaCha20-Poly1305 envelope and encrypts the established
   message type and complete adaptive-transport header; the wire retains only

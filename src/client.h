@@ -113,6 +113,7 @@ protected:
     uint32_t clientIp;
     uint32_t desiredIp;
     std::string deviceId;
+    std::string instanceId;
     int protocolVersion;
     int protocolRequestAttempts;
     bool requireV4;

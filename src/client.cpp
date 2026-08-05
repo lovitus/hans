@@ -57,6 +57,7 @@ namespace
     const uint8_t V5_HANDSHAKE_FINISH = 3;
     const uint8_t V5_CLIENT_DATA_AD[] = "Hans protocol v5 client data";
     const uint8_t V5_SERVER_DATA_AD[] = "Hans protocol v5 server data";
+    const uint8_t SECURE_INSTANCE_MARKER = 0xa5;
     uint32_t get32(const char *buffer)
     {
         uint32_t value;
@@ -112,6 +113,9 @@ Client::Client(int tunnelMtu, const string *deviceName,
     secureIdentity.loadOrCreate(identityFile.empty() ?
                                 Utility::defaultStateFile("identity.key") :
                                 identityFile);
+    uint8_t instanceRandom[32];
+    Utility::secureRandom(instanceRandom, sizeof(instanceRandom));
+    this->instanceId = SecureIdentity::fingerprint(instanceRandom);
     NoiseHandshake::derivePsk(passphrase, securePsk);
     HandshakeEnvelopeV5::deriveKey(securePsk, handshakeKeyV5);
     this->nextTransportSequence = Utility::random32();
@@ -273,7 +277,7 @@ void Client::sendV4HandshakeFinish()
     memset(&connectData, 0, sizeof(connectData));
     connectData.v2.legacy.maxPolls = autoPoll ? adaptiveCredit.target() : maxPolls;
     connectData.v2.legacy.desiredIp = desiredIp;
-    memcpy(connectData.v2.deviceId, deviceId.data(), DEVICE_ID_HEX_SIZE);
+    memcpy(connectData.v2.deviceId, instanceId.data(), DEVICE_ID_HEX_SIZE);
     bool windowsIcmpHelper = false;
 #ifdef WIN32
     windowsIcmpHelper = userspaceNetwork != NULL;
@@ -282,6 +286,7 @@ void Client::sendV4HandshakeFinish()
         autoPoll, windowsIcmpHelper);
     connectData.minimumPolls = 2;
     connectData.maximumPolls = 128;
+    connectData.reserved = SECURE_INSTANCE_MARKER;
     uint8_t metadata[sizeof(connectData) + 2];
     memcpy(metadata, &connectData, sizeof(connectData));
     put16((char *)metadata + sizeof(connectData), (uint16_t)tunnelMtu);
@@ -307,7 +312,7 @@ void Client::sendV5HandshakeFinish()
     memset(&connectData, 0, sizeof(connectData));
     connectData.v2.legacy.maxPolls = autoPoll ? adaptiveCredit.target() : maxPolls;
     connectData.v2.legacy.desiredIp = desiredIp;
-    memcpy(connectData.v2.deviceId, deviceId.data(), DEVICE_ID_HEX_SIZE);
+    memcpy(connectData.v2.deviceId, instanceId.data(), DEVICE_ID_HEX_SIZE);
     bool windowsIcmpHelper = false;
 #ifdef WIN32
     windowsIcmpHelper = userspaceNetwork != NULL;
@@ -316,6 +321,7 @@ void Client::sendV5HandshakeFinish()
         autoPoll, windowsIcmpHelper);
     connectData.minimumPolls = 2;
     connectData.maximumPolls = 128;
+    connectData.reserved = SECURE_INSTANCE_MARKER;
     uint8_t metadata[sizeof(connectData) + 2];
     memcpy(metadata, &connectData, sizeof(connectData));
     put16((char *)metadata + sizeof(connectData), (uint16_t)tunnelMtu);
@@ -407,23 +413,37 @@ bool Client::handleEchoData(const TunnelHeader &header, int dataLength,
             return true;
         }
 
-        if (realAddress != serverAddress || !secureTransport.ready())
+        if (!secureTransport.ready())
             return false;
         if (!openV5Packet(messageType, dataLength))
             return true;
+        if (realAddress != serverAddress)
+        {
+            syslog(LOG_INFO,
+                   "authenticated server packet moved from %s to %s",
+                   serverAddress.format().c_str(),
+                   realAddress.format().c_str());
+            serverAddress = realAddress;
+        }
     }
 
     // A raw IPv6 socket is not tied to the destination address that received
     // a request.  On a multi-address server the kernel may therefore choose a
     // different local source for the Noise response.  Admit only the v4
     // handshake response here; its PSK, server static key and optional pin are
-    // authenticated below before the new address is trusted.  Legacy
-    // handshakes and all established traffic retain strict address matching.
+    // authenticated below before the new address is trusted. Established
+    // v4 packets may likewise update the address only after successful AEAD;
+    // legacy traffic retains strict address matching.
     bool authenticatableHandshakeSource =
         protocolVersion == 4 && state == STATE_CONNECTION_REQUEST_SENT &&
         header.magic == Server::v4Magic &&
         header.type == TunnelHeader::TYPE_HANDSHAKE_RESPONSE;
-    if (realAddress != serverAddress && !authenticatableHandshakeSource)
+    bool authenticatableEstablishedSource =
+        protocolVersion == 4 && secureTransport.ready() &&
+        header.magic == Server::v4Magic &&
+        header.type != TunnelHeader::TYPE_HANDSHAKE_RESPONSE;
+    if (realAddress != serverAddress && !authenticatableHandshakeSource &&
+        !authenticatableEstablishedSource)
         return false;
 
     if (protocolVersion != 5 && header.magic != serverMagic())
@@ -465,6 +485,14 @@ bool Client::handleEchoData(const TunnelHeader &header, int dataLength,
     {
         if (!openV4Packet(header, dataLength))
             return true;
+        if (realAddress != serverAddress)
+        {
+            syslog(LOG_INFO,
+                   "authenticated server packet moved from %s to %s",
+                   serverAddress.format().c_str(),
+                   realAddress.format().c_str());
+            serverAddress = realAddress;
+        }
     }
 
     TransportV3::Header transport;
@@ -1089,13 +1117,6 @@ void Client::transportTick()
         {
             syslog(LOG_INFO, "direct reply probe failed; keeping adaptive poll credits");
             directProbePending = false;
-            /* The probe can leave pre-probe echo requests unusable on paths
-             * that accept only one reply for a request token.  They still
-             * occupy the local window, so refresh the complete window now
-             * instead of waiting for CREDIT_REFRESH_MS while server data is
-             * queued behind stale credits. */
-            outstandingPolls.clear();
-            fillPollWindow();
         }
         if (!directProbePending &&
             (lastDirectProbe == Time::ZERO ||

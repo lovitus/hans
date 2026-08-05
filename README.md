@@ -439,10 +439,12 @@ in use, the connection is rejected as `server full`.
 Only one live process may own a secure identity at a time. If two processes
 use the same identity key concurrently, the session that is already active
 keeps its sticky IP and the other retries until that owner becomes inactive.
-After 15 seconds without authenticated activity, a replacement takes over the
-same sticky IP. Give intentionally parallel clients separate
-`--identity-file` paths; they then have independent device IDs and receive
-separate tunnel IPs.
+The same running process carries an encrypted ephemeral instance token, so it
+can replace its own broken session immediately without being mistaken for a
+second process. After 15 seconds without authenticated activity, a distinct
+replacement takes over the same sticky IP. Give intentionally parallel
+clients separate `--identity-file` paths; they then have independent device
+IDs and receive separate tunnel IPs.
 
 Inspect the local device ID or the server's lease table with:
 

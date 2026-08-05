@@ -103,6 +103,7 @@ protected:
         uint32_t tunnelIp;
         uint32_t desiredIp;
         std::string deviceId;
+        std::string instanceId;
         int protocolVersion;
         int capabilities;
         bool autoPoll;

@@ -64,6 +64,7 @@ namespace
     const uint8_t V5_HANDSHAKE_FINISH = 3;
     const uint8_t V5_CLIENT_DATA_AD[] = "Hans protocol v5 client data";
     const uint8_t V5_SERVER_DATA_AD[] = "Hans protocol v5 server data";
+    const uint8_t SECURE_INSTANCE_MARKER = 0xa5;
 
     void put32(char *buffer, uint32_t value)
     {
@@ -553,11 +554,14 @@ void Server::completeSecureHandshake(ClientData *client,
         removeClient(client);
         return;
     }
-    // In secure protocols the authenticated static Noise key is the durable device
-    // identity.  The encrypted legacy field remains on the wire only for
-    // layout compatibility and is never trusted for lease ownership.
+    // In secure protocols the authenticated static Noise key is the durable
+    // device identity. The encrypted legacy field carries a per-process
+    // instance token for reconnect arbitration and is never trusted for
+    // lease ownership.
     client->deviceId = SecureIdentity::fingerprint(
         client->secureHandshake->remoteStaticKey());
+    client->instanceId = connectData.reserved == SECURE_INSTANCE_MARKER ?
+                         receivedId : string();
     client->desiredIp = connectData.v2.legacy.desiredIp;
     client->capabilities = connectData.capabilities & TransportV3::ALL_CAPABILITIES;
     client->autoPoll = (client->capabilities & TransportV3::CAP_ADAPTIVE_CREDIT) != 0;
@@ -598,11 +602,13 @@ void Server::completeSecureHandshake(ClientData *client,
     {
         /* A copied identity key can otherwise make two live processes evict
          * each other on every reconnect, repeatedly reusing the sticky IP
-         * with different session keys.  Keep the session that is still
-         * proving liveness.  A replacement retries its authenticated
-         * handshake and takes over after the normal inactivity timeout if
-         * the old process is actually gone. */
-        if (!(oldClient->lastActivity +
+         * with different session keys. A reconnect from the same running
+         * instance replaces its own broken session immediately. A distinct
+         * instance waits while the owner proves liveness, then takes over
+         * after the bounded inactivity timeout if the owner is gone. */
+        const bool sameRunningInstance = !client->instanceId.empty() &&
+            client->instanceId == oldClient->instanceId;
+        if (!sameRunningInstance && !(oldClient->lastActivity +
               Time(SECURE_IDENTITY_ACTIVE_MS) < now))
         {
             syslog(LOG_WARNING,

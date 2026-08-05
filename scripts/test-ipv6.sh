@@ -101,9 +101,38 @@ if grep -q 'direct reply mode enabled' "$work/client.log"; then
     sleep 6
 fi
 ip netns exec "$client_ns" ping -c 5 -W 2 10.91.0.1
+
+# Keep client-to-server authenticated traffic flowing while every server
+# reply is lost. The same running process must replace its own one-way-stale
+# session as soon as replies resume, without being classified as a second
+# process using the identity.
+connections_before=$(grep -c 'connection established' "$work/client.log")
+ip netns exec "$server_ns" tc qdisc replace dev "v6a$suffix" root netem loss 100%
+sleep 22
+ip netns exec "$server_ns" tc qdisc del dev "v6a$suffix" root
+reconnected=0
+attempt=60
+while [ "$attempt" -gt 0 ]; do
+    connections_now=$(grep -c 'connection established' "$work/client.log" || true)
+    if [ "$connections_now" -gt "$connections_before" ]; then
+        reconnected=1
+        break
+    fi
+    kill -0 "$server_pid"
+    kill -0 "$client_pid"
+    sleep 0.25
+    attempt=$((attempt - 1))
+done
+[ "$reconnected" -eq 1 ]
+grep -q 'reconnecting expired secure protocol v5 session' "$work/client.log"
+if grep -q 'device identity is already active' "$work/client.log"; then
+    echo 'same running instance was incorrectly treated as a second process' >&2
+    exit 1
+fi
+ip netns exec "$client_ns" ping -c 3 -W 2 10.91.0.1
 grep -q 'secure protocol v5 connection established to fd44:4841:4e53::2' \
     "$work/server.log"
-grep -q 'authenticated server handshake moved from fd44:4841:4e53::9 to fd44:4841:4e53::1' \
+grep -Eq 'authenticated server (handshake|packet) moved from fd44:4841:4e53::9 to fd44:4841:4e53::1' \
     "$work/client.log"
 HANS_STATE_DIR="$work/server-state" ip netns exec "$server_ns" "$BINABS" \
     --list-peers --json | grep -q '"real_ip":"fd44:4841:4e53::2"'
