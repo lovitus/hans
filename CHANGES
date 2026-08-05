@@ -1,5 +1,7 @@
 Release 1.6.0 (August 2026)
 ---------------------------
+* Detect TAP-Windows adapters whose packet reader fails during startup and
+  automatically retry with the bundled Wintun backend
 * Add protocol v5, which pre-authenticates every Noise handshake message with
   a randomized XChaCha20-Poly1305 envelope and encrypts the established
   message type and complete adaptive-transport header; the wire retains only

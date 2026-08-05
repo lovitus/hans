@@ -116,10 +116,12 @@ recommended whenever the operating system supports it. The archive also
 contains the Wintun and lwIP license notices.
 
 Run the normal Windows client from an elevated PowerShell or Command Prompt. Hans
-first uses an installed **TAP-Windows** adapter. If none can be opened, it
-loads the bundled, signed official Wintun runtime and creates `hans1` (or
-`hans2`, `hans3`, ... when earlier names are occupied). `-d "adapter name"`
-still requests an exact TAP/Wintun name.
+first uses an installed **TAP-Windows** adapter. If none can be opened, or its
+packet reader fails during the startup check, Hans loads the bundled, signed
+official Wintun runtime and creates `hans1` (or `hans2`, `hans3`, ... when
+earlier names are occupied). `-d "adapter name"` still requests an exact
+TAP/Wintun name; omit `-d` when automatic fallback should choose a free
+`hansN` name.
 
 The adapter-free userspace client does not need TAP/Wintun or elevation on
 Windows. It sends ICMP through the operating system's asynchronous IP Helper
