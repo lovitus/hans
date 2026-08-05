@@ -53,12 +53,14 @@
 #define SYSDEVICEDIR      "\\Device\\"
 #define USERDEVICEDIR     "\\DosDevices\\Global\\"
 #define TAP_WIN_SUFFIX    ".tap"
+#define READER_THREAD_START_MS 5000
 #define READER_STARTUP_CHECK_MS 250
 
 struct adapter_info
 {
     int reader_read_fd, reader_write_fd;
     HANDLE reader_thread;
+    HANDLE reader_started_event;
     HANDLE adapter_handle;
     bool use_wintun;
     HMODULE wintun_module;
@@ -116,6 +118,7 @@ static struct adapter_info *get_adapter_info_from_fd(int fd)
         .reader_read_fd = -1,
         .reader_write_fd = -1,
         .reader_thread = NULL,
+        .reader_started_event = NULL,
         .adapter_handle = INVALID_HANDLE_VALUE,
         .use_wintun = false,
         .wintun_module = NULL,
@@ -312,10 +315,14 @@ static HANDLE open_tap_adapter(char *name)
 static __stdcall DWORD reader_thread(LPVOID ptr)
 {
     struct adapter_info *adapter_info = ptr;
+    HANDLE started_event = adapter_info->reader_started_event;
     char buf[0xffff]; // maximum IPv4 packet size
     OVERLAPPED overlapped;
     DWORD len;
     int wait_result;
+
+    if (started_event != NULL)
+        SetEvent(started_event);
 
     if (adapter_info->use_wintun)
     {
@@ -391,16 +398,57 @@ static __stdcall DWORD reader_thread(LPVOID ptr)
 
 static bool start_reader_thread(struct adapter_info *adapter_info)
 {
+    HANDLE wait_handles[2];
     DWORD wait_error = ERROR_SUCCESS;
     DWORD wait_result;
+
+    adapter_info->reader_started_event = CreateEvent(NULL, TRUE, FALSE, NULL);
+    if (adapter_info->reader_started_event == NULL)
+    {
+        error("reader startup event creation: %s", winerror(GetLastError()));
+        return false;
+    }
 
     adapter_info->reader_thread = CreateThread(
         NULL, 0, reader_thread, adapter_info, 0, NULL);
     if (adapter_info->reader_thread == NULL)
     {
         error("reader thread creation: %s", winerror(GetLastError()));
+        CloseHandle(adapter_info->reader_started_event);
+        adapter_info->reader_started_event = NULL;
         return false;
     }
+
+    /* Do not let a busy scheduler consume the health-check grace period
+     * before the reader has run at all. */
+    wait_handles[0] = adapter_info->reader_thread;
+    wait_handles[1] = adapter_info->reader_started_event;
+    wait_result = WaitForMultipleObjects(2, wait_handles, FALSE,
+                                         READER_THREAD_START_MS);
+    if (wait_result != WAIT_OBJECT_0 + 1)
+    {
+        if (wait_result == WAIT_FAILED)
+            wait_error = GetLastError();
+        if (wait_result != WAIT_OBJECT_0)
+            TerminateThread(adapter_info->reader_thread, 1);
+        CloseHandle(adapter_info->reader_thread);
+        adapter_info->reader_thread = NULL;
+        CloseHandle(adapter_info->reader_started_event);
+        adapter_info->reader_started_event = NULL;
+
+        if (wait_result == WAIT_OBJECT_0)
+            error("adapter reader stopped before startup");
+        else if (wait_result == WAIT_TIMEOUT)
+            error("adapter reader did not start within %d ms",
+                  READER_THREAD_START_MS);
+        else
+            error("waiting for adapter reader startup: %s",
+                  winerror(wait_error));
+        return false;
+    }
+
+    CloseHandle(adapter_info->reader_started_event);
+    adapter_info->reader_started_event = NULL;
 
     /* A TAP device can remain registered and accept CreateFile() even when
      * its driver can no longer service overlapped reads.  Give the first read
@@ -504,6 +552,12 @@ int tun_close(int fd, char *dev)
         TerminateThread(adapter_info->reader_thread, 0);
         CloseHandle(adapter_info->reader_thread);
         adapter_info->reader_thread = NULL;
+    }
+
+    if (adapter_info->reader_started_event != NULL)
+    {
+        CloseHandle(adapter_info->reader_started_event);
+        adapter_info->reader_started_event = NULL;
     }
 
     close(adapter_info->reader_read_fd);
