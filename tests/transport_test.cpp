@@ -76,6 +76,14 @@ static void testSequenceTracking()
     assert(!distant.accept(100));
     assert(!TransportV3::acknowledged(100, distant.ackSequence(),
                                       distant.ackBits()));
+
+    SequenceTracker boundary;
+    assert(boundary.accept(100));
+    assert(boundary.accept(132));
+    assert(TransportV3::acknowledged(100, boundary.ackSequence(),
+                                     boundary.ackBits()));
+    assert(!TransportV3::acknowledged(99, boundary.ackSequence(),
+                                      boundary.ackBits()));
 }
 
 static std::vector<char> packet(const char *text)

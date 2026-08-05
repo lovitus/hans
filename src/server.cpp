@@ -56,6 +56,7 @@ namespace
 {
     const int DIRECT_UNACKED_LIMIT = 3;
     const int DIRECT_ACK_TIMEOUT_MS = 3000;
+    const int SECURE_IDENTITY_ACTIVE_MS = 15000;
     const int MAX_PENDING_SECURE_HANDSHAKES = 256;
     const int MAX_PENDING_SECURE_HANDSHAKES_PER_ADDRESS = 8;
     const uint8_t V5_HANDSHAKE_INIT = 1;
@@ -601,7 +602,8 @@ void Server::completeSecureHandshake(ClientData *client,
          * proving liveness.  A replacement retries its authenticated
          * handshake and takes over after the normal inactivity timeout if
          * the old process is actually gone. */
-        if (!(oldClient->lastActivity + KEEP_ALIVE_INTERVAL * 2 < now))
+        if (!(oldClient->lastActivity +
+              Time(SECURE_IDENTITY_ACTIVE_MS) < now))
         {
             syslog(LOG_WARNING,
                    "device %s already has an active session; keeping the existing peer",

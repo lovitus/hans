@@ -177,6 +177,8 @@ bool SequenceTracker::accept(uint32_t sequence)
         }
         if (distance > 32)
             receivedBits = 0;
+        else if (distance == 32)
+            receivedBits = 1u << 31;
         else
         {
             receivedBits <<= distance;
