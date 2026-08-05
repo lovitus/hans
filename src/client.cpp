@@ -115,6 +115,7 @@ Client::Client(int tunnelMtu, const string *deviceName,
     NoiseHandshake::derivePsk(passphrase, securePsk);
     HandshakeEnvelopeV5::deriveKey(securePsk, handshakeKeyV5);
     this->nextTransportSequence = Utility::random32();
+    this->lastUnauthenticatedWarning = Time::ZERO;
     this->transportMode = TransportV3::MODE_CREDIT;
     this->peerTransportMode = TransportV3::MODE_CREDIT;
     this->directProbePending = false;
@@ -795,11 +796,14 @@ bool Client::openV4Packet(const TunnelHeader &header, int &dataLength)
                           localReceiverIndex)
         return false;
     size_t plainLength = 0;
+    SecureTransport::OpenStatus openStatus;
     if (!secureTransport.openInPlace(
             (const uint8_t *)&header, sizeof(header),
-            (uint8_t *)echoReceivePayloadBuffer(), dataLength, plainLength))
+            (uint8_t *)echoReceivePayloadBuffer(), dataLength, plainLength,
+            &openStatus))
     {
-        syslog(LOG_WARNING, "discarding unauthenticated protocol v4 packet");
+        if (openStatus == SecureTransport::OPEN_AUTH_FAILED)
+            logUnauthenticatedPacket(4);
         return false;
     }
     dataLength = (int)plainLength;
@@ -814,13 +818,17 @@ bool Client::openV5Packet(TunnelHeader::Type &type, int &dataLength)
         get32((const char *)packet) != localReceiverIndex)
         return false;
     size_t plainLength = 0;
+    SecureTransport::OpenStatus openStatus;
     if (!secureTransport.openInPlace(
             V5_SERVER_DATA_AD, sizeof(V5_SERVER_DATA_AD) - 1,
-            packet, packetLength, plainLength) || plainLength < 1)
+            packet, packetLength, plainLength, &openStatus))
     {
-        syslog(LOG_WARNING, "discarding unauthenticated protocol v5 packet");
+        if (openStatus == SecureTransport::OPEN_AUTH_FAILED)
+            logUnauthenticatedPacket(5);
         return false;
     }
+    if (plainLength < 1)
+        return false;
     uint8_t rawType = packet[0];
     if (rawType < TunnelHeader::TYPE_RESET_CONNECTION ||
         rawType > TunnelHeader::TYPE_HANDSHAKE_FINISH)
@@ -830,6 +838,17 @@ bool Client::openV5Packet(TunnelHeader::Type &type, int &dataLength)
     if (dataLength > 0)
         memmove(echoReceivePayloadBuffer(), packet + 1, dataLength);
     return true;
+}
+
+void Client::logUnauthenticatedPacket(int version)
+{
+    const int AUTH_WARNING_INTERVAL_MS = 5000;
+    if (lastUnauthenticatedWarning != Time::ZERO &&
+        !(lastUnauthenticatedWarning + Time(AUTH_WARNING_INTERVAL_MS) < now))
+        return;
+    lastUnauthenticatedWarning = now;
+    syslog(LOG_WARNING, "discarding unauthenticated protocol v%d packet",
+           version);
 }
 
 bool Client::parseTransportHeader(int &dataLength,

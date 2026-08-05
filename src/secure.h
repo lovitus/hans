@@ -111,6 +111,13 @@ class SecureTransport
 {
 public:
     enum { PREFIX_SIZE = 12, TAG_SIZE = 16, OVERHEAD = 28 };
+    enum OpenStatus
+    {
+        OPEN_OK,
+        OPEN_NOT_FOR_SESSION,
+        OPEN_REPLAY,
+        OPEN_AUTH_FAILED
+    };
 
     SecureTransport();
     ~SecureTransport();
@@ -134,7 +141,7 @@ public:
                       size_t packetCapacity);
     bool openInPlace(const uint8_t *additionalData, size_t additionalLength,
                      uint8_t *packet, size_t packetLength,
-                     size_t &plainLength);
+                     size_t &plainLength, OpenStatus *status = NULL);
 
 private:
     bool initialized;

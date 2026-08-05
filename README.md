@@ -436,6 +436,13 @@ while unused addresses remain; only when the pool is full does the server
 reclaim the least-recently-seen offline lease. If every address is actively
 in use, the connection is rejected as `server full`.
 
+Only one live process may own a secure identity at a time. If two processes
+use the same identity key concurrently, the session that is already active
+keeps its sticky IP and the other retries until that owner becomes inactive.
+After the normal liveness timeout, a replacement takes over the same sticky
+IP. Give intentionally parallel clients separate `--identity-file` paths;
+they then have independent device IDs and receive separate tunnel IPs.
+
 Inspect the local device ID or the server's lease table with:
 
 ```sh

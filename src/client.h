@@ -95,6 +95,7 @@ protected:
                         uint8_t flags, bool trackPoll);
     bool openV4Packet(const TunnelHeader &header, int &dataLength);
     bool openV5Packet(TunnelHeader::Type &type, int &dataLength);
+    void logUnauthenticatedPacket(int version);
     void sendV4HandshakeFinish();
     void sendV5HandshakeFinish();
     void sendRawEchoToServer(const uint8_t *packet, int length);
@@ -134,6 +135,7 @@ protected:
     SequenceTracker receivedSequences;
     TransportReorderBuffer reorderBuffer;
     Time lastTransportTelemetry;
+    Time lastUnauthenticatedWarning;
     AdaptiveCredit adaptiveCredit;
     std::map<uint32_t, Time> outstandingPolls;
     uint8_t transportMode;

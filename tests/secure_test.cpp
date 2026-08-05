@@ -128,10 +128,29 @@ static void testPreparedTransportMatchesWireFormat()
     packet[SecureTransport::PREFIX_SIZE + 1] ^= 0x40;
     uint8_t before[sizeof(packet)];
     memcpy(before, packet, sizeof(packet));
+    SecureTransport::OpenStatus openStatus = SecureTransport::OPEN_OK;
     assert(!tamperReceiver.openInPlace(ad, sizeof(ad), packet,
                                        SecureTransport::OVERHEAD + sizeof(plain),
-                                       openedLength));
+                                       openedLength, &openStatus));
+    assert(openStatus == SecureTransport::OPEN_AUTH_FAILED);
     assert(memcmp(before, packet, sizeof(packet)) == 0);
+
+    SecureTransport replaySender, replayReceiver;
+    replaySender.initialize(21, 22, sendKey, receiveKey);
+    replayReceiver.initialize(22, 21, receiveKey, sendKey);
+    memcpy(packet + SecureTransport::PREFIX_SIZE, plain, sizeof(plain));
+    assert(replaySender.sealPrepared(ad, sizeof(ad), packet, sizeof(plain),
+                                     sizeof(packet)));
+    uint8_t replayPacket[sizeof(packet)];
+    memcpy(replayPacket, packet, sizeof(packet));
+    assert(replayReceiver.openInPlace(ad, sizeof(ad), packet,
+                                      SecureTransport::OVERHEAD + sizeof(plain),
+                                      openedLength, &openStatus));
+    assert(openStatus == SecureTransport::OPEN_OK);
+    assert(!replayReceiver.openInPlace(
+        ad, sizeof(ad), replayPacket,
+        SecureTransport::OVERHEAD + sizeof(plain), openedLength, &openStatus));
+    assert(openStatus == SecureTransport::OPEN_REPLAY);
 }
 
 static void testWrongPskAndTamper()

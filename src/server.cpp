@@ -589,7 +589,23 @@ void Server::completeSecureHandshake(ClientData *client,
 
     ClientData *oldClient = getClientByDeviceId(client->deviceId, client);
     if (oldClient != NULL)
+    {
+        /* A copied identity key can otherwise make two live processes evict
+         * each other on every reconnect, repeatedly reusing the sticky IP
+         * with different session keys.  Keep the session that is still
+         * proving liveness.  A replacement retries its authenticated
+         * handshake and takes over after the normal inactivity timeout if
+         * the old process is actually gone. */
+        if (!(oldClient->lastActivity + KEEP_ALIVE_INTERVAL * 2 < now))
+        {
+            syslog(LOG_WARNING,
+                   "device %s already has an active session; keeping the existing peer",
+                   client->deviceId.c_str());
+            removeClient(client);
+            return;
+        }
         removeClient(oldClient);
+    }
     client->tunnelIp = reserveTunnelIp(client->desiredIp, client->deviceId);
     if (client->tunnelIp == 0)
     {

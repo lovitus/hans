@@ -884,15 +884,21 @@ bool SecureTransport::sealPrepared(const uint8_t *ad, size_t adLength,
 
 bool SecureTransport::openInPlace(const uint8_t *ad, size_t adLength,
                                   uint8_t *packet, size_t packetLength,
-                                  size_t &plainLength)
+                                  size_t &plainLength, OpenStatus *status)
 {
     plainLength = 0;
+    if (status != NULL)
+        *status = OPEN_NOT_FOR_SESSION;
     if (!initialized || packet == NULL || packetLength < OVERHEAD ||
         get32(packet) != receiveIndex)
         return false;
     uint64_t counter = get64le(packet + 4);
     if (!replay.canAccept(counter))
+    {
+        if (status != NULL)
+            *status = OPEN_REPLAY;
         return false;
+    }
     plainLength = packetLength - OVERHEAD;
     const uint8_t *cipher = packet + PREFIX_SIZE;
     const uint8_t *tag = cipher + plainLength;
@@ -903,8 +909,12 @@ bool SecureTransport::openInPlace(const uint8_t *ad, size_t adLength,
                           cipher, plainLength))
     {
         plainLength = 0;
+        if (status != NULL)
+            *status = OPEN_AUTH_FAILED;
         return false;
     }
     replay.accept(counter);
+    if (status != NULL)
+        *status = OPEN_OK;
     return true;
 }

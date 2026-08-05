@@ -17,6 +17,7 @@ client_log="$work/client.log"
 cleanup() {
     kill "${client_pid:-}" "${server_pid:-}" "${server_http_pid:-}" \
          "${client2_pid:-}" "${client_http_pid:-}" "${allports_http_pid:-}" \
+         "${duplicate_pid:-}" \
          "${large_sink_pid:-}" "${large_source_pid:-}" "${udp_pid:-}" \
          2>/dev/null || true
     ip netns delete "$client_ns" 2>/dev/null || true
@@ -165,6 +166,34 @@ while [ "$attempt" -gt 0 ]; do
 done
 grep -q "userspace network ready at 10.77.88.101" "$work/client2.log"
 
+# Reusing one authenticated identity concurrently is different from sharing
+# one underlay address with independent identities.  The already-live process
+# must retain its sticky IP; otherwise two processes continuously replace one
+# another with new traffic keys and neither has a stable data plane.  A truly
+# dead process is still replaced after the server's normal inactivity timeout.
+ip netns exec "$client_ns" setpriv --reuid 65534 --regid 65534 --clear-groups \
+    env HANS_STATE_DIR="$work/client-state" "$BINABS" \
+    -c 192.0.2.1 -p hans-userspace-ci --require-v5 -f -v \
+    --feature userspace --socks5 127.0.0.1:18090 \
+    >"$work/duplicate.log" 2>&1 &
+duplicate_pid=$!
+sleep 6
+kill -0 "$duplicate_pid"
+if grep -q "userspace network ready" "$work/duplicate.log"; then
+    echo "a concurrent process stole an active secure identity" >&2
+    exit 1
+fi
+grep -q "already has an active session; keeping the existing peer" "$server_log"
+ip netns exec "$client_ns" curl --fail --silent --show-error --max-time 20 \
+    --socks5-hostname 127.0.0.1:18080 \
+    --proxy-user hans:userspace-secret \
+    http://10.77.88.1:18080/$(basename "$BINABS") \
+    -o "$work/identity-owner-download"
+cmp "$BINABS" "$work/identity-owner-download"
+kill "$duplicate_pid"
+wait "$duplicate_pid" || true
+duplicate_pid=
+
 # Userspace mode must not create any kernel tunnel interface in the client.
 [ "$(ip -n "$client_ns" -o link show | wc -l)" -eq 2 ]
 
@@ -299,6 +328,39 @@ kill -0 "$client_pid"
 
 kill -0 "$server_pid"
 kill -0 "$client_pid"
+
+# Stop the identity owner without a protocol-level disconnect, then verify a
+# waiting replacement can claim the same sticky lease once server liveness
+# expires. This covers the other side of the active-owner decision above.
+kill "$client_pid"
+if ! wait "$client_pid"; then
+    echo "userspace client did not exit cleanly before identity takeover" >&2
+    exit 1
+fi
+client_pid=
+ip netns exec "$client_ns" setpriv --reuid 65534 --regid 65534 --clear-groups \
+    env HANS_STATE_DIR="$work/client-state" "$BINABS" \
+    -c 192.0.2.1 -p hans-userspace-ci --require-v5 -f -v \
+    --feature userspace --socks5 127.0.0.1:18080 \
+    >"$work/replacement.log" 2>&1 &
+client_pid=$!
+replacement_ready=0
+attempt=140
+while [ "$attempt" -gt 0 ]; do
+    if grep -q "userspace network ready at 10.77.88.100" \
+              "$work/replacement.log"; then
+        replacement_ready=1
+        break
+    fi
+    kill -0 "$client_pid"
+    sleep 0.25
+    attempt=$((attempt - 1))
+done
+if [ "$replacement_ready" -ne 1 ]; then
+    echo "replacement did not take over an inactive secure identity" >&2
+    cat "$work/replacement.log" >&2
+    exit 1
+fi
 
 # Teardown is part of the product contract. Waiting here is important: merely
 # sending SIGTERM lets a userspace-client destructor crash go unnoticed.
