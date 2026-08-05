@@ -53,6 +53,7 @@
 #define SYSDEVICEDIR      "\\Device\\"
 #define USERDEVICEDIR     "\\DosDevices\\Global\\"
 #define TAP_WIN_SUFFIX    ".tap"
+#define READER_STARTUP_CHECK_MS 250
 
 struct adapter_info
 {
@@ -301,7 +302,8 @@ static HANDLE open_tap_adapter(char *name)
         return INVALID_HANDLE_VALUE;
     }
 
-    strncpy(name, adapter_name, VTUN_DEV_LEN);
+    strncpy(name, adapter_name, VTUN_DEV_LEN - 1);
+    name[VTUN_DEV_LEN - 1] = '\0';
 
     noerror();
     return adapter_handle;
@@ -387,10 +389,57 @@ static __stdcall DWORD reader_thread(LPVOID ptr)
     }
 }
 
+static bool start_reader_thread(struct adapter_info *adapter_info)
+{
+    DWORD wait_error = ERROR_SUCCESS;
+    DWORD wait_result;
+
+    adapter_info->reader_thread = CreateThread(
+        NULL, 0, reader_thread, adapter_info, 0, NULL);
+    if (adapter_info->reader_thread == NULL)
+    {
+        error("reader thread creation: %s", winerror(GetLastError()));
+        return false;
+    }
+
+    /* A TAP device can remain registered and accept CreateFile() even when
+     * its driver can no longer service overlapped reads.  Give the first read
+     * enough time to enter its normal pending state; an early thread exit is
+     * a data-plane failure, not a usable adapter. */
+    wait_result = WaitForSingleObject(adapter_info->reader_thread,
+                                      READER_STARTUP_CHECK_MS);
+    if (wait_result == WAIT_TIMEOUT)
+        return true;
+
+    if (wait_result != WAIT_OBJECT_0)
+    {
+        wait_error = GetLastError();
+        TerminateThread(adapter_info->reader_thread, 1);
+    }
+    CloseHandle(adapter_info->reader_thread);
+    adapter_info->reader_thread = NULL;
+
+    if (wait_result == WAIT_OBJECT_0)
+        error("adapter reader stopped during startup");
+    else
+        error("waiting for adapter reader startup: %s",
+              winerror(wait_error));
+    return false;
+}
+
 int tun_open(char *dev)
 {
     struct adapter_info *adapter_info;
     int socket_pair[2];
+    char requested_name[VTUN_DEV_LEN];
+    bool explicit_name = dev && dev[0];
+
+    requested_name[0] = '\0';
+    if (explicit_name)
+    {
+        strncpy(requested_name, dev, sizeof(requested_name) - 1);
+        requested_name[sizeof(requested_name) - 1] = '\0';
+    }
 
     /* The protocol argument must be zero for AF_UNIX. Older Cygwin releases
      * tolerated PF_UNIX here, while current releases correctly reject it
@@ -406,17 +455,39 @@ int tun_open(char *dev)
     adapter_info->reader_write_fd = socket_pair[1];
 
     adapter_info->adapter_handle = open_tap_adapter(dev);
-    if (adapter_info->adapter_handle == INVALID_HANDLE_VALUE &&
-        !open_wintun_adapter(adapter_info, dev))
+    if (adapter_info->adapter_handle == INVALID_HANDLE_VALUE)
     {
-        tun_close(adapter_info->reader_read_fd, NULL);
-        return -1;
+        if (!open_wintun_adapter(adapter_info, dev) ||
+            !start_reader_thread(adapter_info))
+        {
+            tun_close(adapter_info->reader_read_fd, NULL);
+            return -1;
+        }
+        return adapter_info->reader_read_fd;
     }
 
-    adapter_info->reader_thread = CreateThread(NULL, 0, reader_thread, adapter_info, 0, NULL);
-    if (adapter_info->reader_thread == NULL)
+    if (start_reader_thread(adapter_info))
+        return adapter_info->reader_read_fd;
+
+    syslog(LOG_WARNING,
+           "TAP adapter '%s' failed its startup read check; falling back to Wintun",
+           dev);
+    CloseHandle(adapter_info->adapter_handle);
+    adapter_info->adapter_handle = INVALID_HANDLE_VALUE;
+
+    /* Auto-selection must not reuse the broken TAP display name.  Let Wintun
+     * select the first free hansN name.  An explicit -d remains explicit. */
+    if (explicit_name)
     {
-        error("reader thread creation: %s", winerror(GetLastError()));
+        strncpy(dev, requested_name, VTUN_DEV_LEN - 1);
+        dev[VTUN_DEV_LEN - 1] = '\0';
+    }
+    else
+        dev[0] = '\0';
+
+    if (!open_wintun_adapter(adapter_info, dev) ||
+        !start_reader_thread(adapter_info))
+    {
         tun_close(adapter_info->reader_read_fd, NULL);
         return -1;
     }
@@ -431,6 +502,7 @@ int tun_close(int fd, char *dev)
     if (adapter_info->reader_thread != NULL)
     {
         TerminateThread(adapter_info->reader_thread, 0);
+        CloseHandle(adapter_info->reader_thread);
         adapter_info->reader_thread = NULL;
     }
 
