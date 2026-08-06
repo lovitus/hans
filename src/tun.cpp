@@ -46,16 +46,19 @@ typedef ip IpHeader;
 using std::string;
 
 #ifdef WIN32
-static void winsystem(char *cmd)
+static bool winsystem(char *cmd)
 {
     STARTUPINFO info = { sizeof(info) };
     PROCESS_INFORMATION processInfo;
+    DWORD exitCode = 1;
     if (CreateProcess(NULL, cmd, NULL, NULL, TRUE, 0, NULL, NULL, &info, &processInfo))
     {
         WaitForSingleObject(processInfo.hProcess, INFINITE);
+        GetExitCodeProcess(processInfo.hProcess, &exitCode);
         CloseHandle(processInfo.hProcess);
         CloseHandle(processInfo.hThread);
     }
+    return exitCode == 0;
 }
 #endif
 
@@ -92,7 +95,8 @@ void Tun::setMtu(int newMtu)
 #ifdef WIN32
     cmdline << "netsh interface ipv4 set subinterface \"" << this->device
             << "\" mtu=" << mtu;
-    winsystem(cmdline.str().data());
+    if (!winsystem(cmdline.str().data()))
+        syslog(LOG_ERR, "could not set tun device mtu");
 #else
     cmdline << "/sbin/ifconfig " << this->device << " mtu " << mtu;
     if (system(cmdline.str().data()) != 0)
@@ -117,7 +121,10 @@ void Tun::setIp(uint32_t ip, uint32_t destIp)
 #ifdef WIN32
     cmdline << "netsh interface ip set address name=\"" << device << "\" "
             << "static " << ips << " 255.255.255.0";
-    winsystem(cmdline.str().data());
+    if (!winsystem(cmdline.str().data()))
+        syslog(LOG_ERR, "could not set tun device ip address on interface \"%s\" "
+               "(netsh failed; the address may already be assigned to another adapter)",
+               device.data());
 
     if (!tun_set_ip(fd, ip, ip & 0xffffff00, 0xffffff00))
         syslog(LOG_ERR, "could not set tun device driver ip address: %s", tun_last_error());

@@ -27,6 +27,7 @@
 #include <syslog.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
+#include <ctype.h>
 #include <errno.h>
 #include <stdio.h>
 #include <stdarg.h>
@@ -253,6 +254,55 @@ static bool open_wintun_adapter(struct adapter_info *adapter_info, char *name)
     return false;
 }
 
+/* Hans always names adapters it creates itself "hans1".."hans255" (see
+ * open_wintun_adapter's auto-selection loop below). When no explicit -d
+ * name is given, restrict TAP auto-selection to that same naming scheme so
+ * we never take over a TAP-Windows adapter that belongs to some other VPN
+ * software (which uses the identical tap-windows6 driver and would
+ * otherwise be indistinguishable from ours). */
+static bool is_hans_adapter_name(const char *name)
+{
+    size_t index;
+
+    if (!name || strncmp(name, "hans", 4) != 0 || !name[4])
+        return false;
+    for (index = 4; name[index]; index++)
+        if (!isdigit((unsigned char)name[index]))
+            return false;
+    return true;
+}
+
+/* Release a static IPv4 address left behind on one of our own adapters
+ * (identified via is_hans_adapter_name) so it cannot collide with the
+ * address we are about to assign to the adapter that replaces it. This
+ * must never be called with a name that has not been verified as ours. */
+static void reset_adapter_dhcp(const char *name)
+{
+    char cmdline[512];
+    STARTUPINFO info;
+    PROCESS_INFORMATION process_info;
+    DWORD exit_code = 1;
+
+    snprintf(cmdline, sizeof(cmdline),
+             "netsh interface ip set address name=\"%s\" dhcp", name);
+
+    memset(&info, 0, sizeof(info));
+    info.cb = sizeof(info);
+    if (CreateProcess(NULL, cmdline, NULL, NULL, TRUE, 0, NULL, NULL, &info,
+                       &process_info))
+    {
+        WaitForSingleObject(process_info.hProcess, INFINITE);
+        GetExitCodeProcess(process_info.hProcess, &exit_code);
+        CloseHandle(process_info.hProcess);
+        CloseHandle(process_info.hThread);
+    }
+
+    if (exit_code != 0)
+        syslog(LOG_WARNING,
+               "could not release stale IPv4 address from Hans adapter '%s'",
+               name);
+}
+
 static HANDLE open_tap_adapter(char *name)
 {
     HKEY connections_key, adapter_key;
@@ -287,7 +337,12 @@ static HANDLE open_tap_adapter(char *name)
         }
         RegCloseKey(adapter_key);
 
-        if (name && name[0] && strcmp(name, adapter_name) && strcmp(name, adapter_id))
+        if (name && name[0])
+        {
+            if (strcmp(name, adapter_name) && strcmp(name, adapter_id))
+                continue;
+        }
+        else if (!is_hans_adapter_name(adapter_name))
             continue;
 
         snprintf(adapter_path, sizeof(adapter_path), USERMODEDEVICEDIR "%s" TAP_WIN_SUFFIX, adapter_id);
@@ -522,6 +577,14 @@ int tun_open(char *dev)
            dev);
     CloseHandle(adapter_info->adapter_handle);
     adapter_info->adapter_handle = INVALID_HANDLE_VALUE;
+
+    /* This TAP adapter may still hold a static IPv4 address from an earlier
+     * Hans session. Release it so it cannot collide with the address we are
+     * about to assign to the Wintun adapter that replaces it. Only do this
+     * for adapters matching our own "hansN" naming scheme, never for a
+     * foreign TAP adapter that happens to belong to other VPN software. */
+    if (is_hans_adapter_name(dev))
+        reset_adapter_dhcp(dev);
 
     /* Auto-selection must not reuse the broken TAP display name.  Let Wintun
      * select the first free hansN name.  An explicit -d remains explicit. */
