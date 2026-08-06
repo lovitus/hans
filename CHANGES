@@ -1,7 +1,15 @@
-Release 1.6.0 (August 2026)
+Release 1.7.0 (August 2026)
 ---------------------------
+* Improve native Windows userspace throughput and stability with reusable ICMP
+  request resources, bounded pending operations, direct reply copies, and
+  zero-copy handling for contiguous userspace packets
+* Keep Windows userspace clients on reply-credit flow control, avoiding direct
+  reply mode on the IP Helper transport where asynchronous sends can otherwise
+  overrun receive processing
 * Detect TAP-Windows adapters whose packet reader fails during startup and
-  automatically retry with the bundled Wintun backend
+  automatically retry with the bundled Wintun backend; restrict automatic TAP
+  selection to Hans-owned `hansN` adapters and release their stale static IPv4
+  configuration before fallback
 * Prevent concurrent processes using one secure identity from repeatedly
   evicting each other's live session; the active owner keeps its sticky IP and
   an inactive owner can be replaced after a bounded ownership timeout, while
@@ -12,6 +20,11 @@ Release 1.6.0 (August 2026)
 * Fix the exact 32-packet ACK bitmap gap boundary without an undefined shift
 * Authenticate established v4/v5 packets before following a server's changed
   ICMPv6 source address, preserving connectivity on multi-address hosts
+* Make ICMPv6 CI address selection deterministic and pin the official Debian
+  MIPS build image for reproducible cross-platform validation
+
+Release 1.6.0 (August 2026)
+---------------------------
 * Add protocol v5, which pre-authenticates every Noise handshake message with
   a randomized XChaCha20-Poly1305 envelope and encrypts the established
   message type and complete adaptive-transport header; the wire retains only
